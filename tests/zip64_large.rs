@@ -194,7 +194,7 @@ fn zip64_large() {
     let mut buf = [0u8; 32];
 
     for i in 0..archive.len() {
-        let mut file = archive.by_index(i).unwrap();
+        let mut file = archive.by_index(i).unwrap().unwrap();
         #[allow(deprecated)]
         let outpath = file.sanitized_name();
         println!(

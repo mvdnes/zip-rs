@@ -22,10 +22,6 @@ pub enum ZipError {
     #[error("unsupported Zip archive")]
     UnsupportedArchive(&'static str),
 
-    /// The requested file could not be found in the archive
-    #[error("specified file not found in archive")]
-    FileNotFound,
-
     /// No password was given but the data is encrypted
     #[error("missing password, file in archive is encrypted")]
     PasswordRequired,

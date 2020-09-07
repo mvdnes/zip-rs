@@ -37,7 +37,7 @@ mod ffi {
 ///     let mut zip = zip::ZipArchive::new(reader)?;
 ///
 ///     for i in 0..zip.len() {
-///         let mut file = zip.by_index(i)?;
+///         let mut file = zip.by_index(i)?.unwrap();
 ///         println!("Filename: {}", file.name());
 ///         std::io::copy(&mut file, &mut std::io::stdout());
 ///     }
@@ -341,12 +341,12 @@ impl<R: Read + io::Seek> ZipArchive<R> {
         &'a mut self,
         name: &str,
         password: &[u8],
-    ) -> ZipResult<ZipFile<'a>> {
+    ) -> ZipResult<Option<ZipFile<'a>>> {
         self.by_name_with_optional_password(name, Some(password))
     }
 
     /// Search for a file entry by name
-    pub fn by_name<'a>(&'a mut self, name: &str) -> ZipResult<ZipFile<'a>> {
+    pub fn by_name<'a>(&'a mut self, name: &str) -> ZipResult<Option<ZipFile<'a>>> {
         self.by_name_with_optional_password(name, None)
     }
 
@@ -354,14 +354,15 @@ impl<R: Read + io::Seek> ZipArchive<R> {
         &'a mut self,
         name: &str,
         password: Option<&[u8]>,
-    ) -> ZipResult<ZipFile<'a>> {
-        let index = match self.names_map.get(name) {
-            Some(index) => *index,
-            None => {
-                return Err(ZipError::FileNotFound);
-            }
-        };
-        self.by_index_with_optional_password(index, password)
+    ) -> ZipResult<Option<ZipFile<'a>>> {
+        self.names_map
+            .get(name)
+            .copied()
+            .map(move |i| self
+                .by_index_with_optional_password(i, password)
+                .transpose()
+                .unwrap())
+            .transpose()
     }
 
     /// Get a contained file by index, decrypt with given password
@@ -369,12 +370,12 @@ impl<R: Read + io::Seek> ZipArchive<R> {
         &'a mut self,
         file_number: usize,
         password: &[u8],
-    ) -> ZipResult<ZipFile<'a>> {
+    ) -> ZipResult<Option<ZipFile<'a>>> {
         self.by_index_with_optional_password(file_number, Some(password))
     }
 
     /// Get a contained file by index
-    pub fn by_index<'a>(&'a mut self, file_number: usize) -> ZipResult<ZipFile<'a>> {
+    pub fn by_index<'a>(&'a mut self, file_number: usize) -> ZipResult<Option<ZipFile<'a>>> {
         self.by_index_with_optional_password(file_number, None)
     }
 
@@ -382,9 +383,9 @@ impl<R: Read + io::Seek> ZipArchive<R> {
         &'a mut self,
         file_number: usize,
         mut password: Option<&[u8]>,
-    ) -> ZipResult<ZipFile<'a>> {
+    ) -> ZipResult<Option<ZipFile<'a>>> {
         if file_number >= self.files.len() {
-            return Err(ZipError::FileNotFound);
+            return Ok(None);
         }
         let data = &mut self.files[file_number];
 
@@ -411,10 +412,10 @@ impl<R: Read + io::Seek> ZipArchive<R> {
         self.reader.seek(io::SeekFrom::Start(data.data_start))?;
         let limit_reader = (self.reader.by_ref() as &mut dyn Read).take(data.compressed_size);
 
-        Ok(ZipFile {
+        Ok(Some(ZipFile {
             reader: make_reader(data.compression_method, data.crc32, limit_reader, password)?,
             data: Cow::Borrowed(data),
-        })
+        }))
     }
 
     /// Unwrap and return the inner reader object
@@ -847,8 +848,8 @@ mod test {
         let mut reader1 = ZipArchive::new(io::Cursor::new(v)).unwrap();
         let mut reader2 = reader1.clone();
 
-        let mut file1 = reader1.by_index(0).unwrap();
-        let mut file2 = reader2.by_index(0).unwrap();
+        let mut file1 = reader1.by_index(0).unwrap().unwrap();
+        let mut file2 = reader2.by_index(0).unwrap().unwrap();
 
         let t = file1.last_modified();
         assert_eq!(
@@ -888,7 +889,7 @@ mod test {
         let mut zip = ZipArchive::new(io::Cursor::new(v)).unwrap();
 
         for i in 0..zip.len() {
-            let zip_file = zip.by_index(i).unwrap();
+            let zip_file = zip.by_index(i).unwrap().unwrap();
             #[allow(deprecated)]
             let full_name = zip_file.sanitized_name();
             let file_name = full_name.file_name().unwrap().to_str().unwrap();
