@@ -103,9 +103,9 @@ fn doit(
     src_dir: &str,
     dst_file: &str,
     method: zip::CompressionMethod,
-) -> zip::result::ZipResult<()> {
+) -> zip::result::ZipResult<Option<()>> {
     if !Path::new(src_dir).is_dir() {
-        return Err(ZipError::FileNotFound);
+        return Ok(None);
     }
 
     let path = Path::new(dst_file);
@@ -116,5 +116,5 @@ fn doit(
 
     zip_dir(&mut it.filter_map(|e| e.ok()), src_dir, file, method)?;
 
-    Ok(())
+    Ok(Some(()))
 }

@@ -18,7 +18,7 @@ fn real_main() -> i32 {
     let mut archive = zip::ZipArchive::new(reader).unwrap();
 
     for i in 0..archive.len() {
-        let file = archive.by_index(i).unwrap();
+        let file = archive.by_index(i).unwrap().unwrap();
         #[allow(deprecated)]
         let outpath = file.sanitized_name();
 

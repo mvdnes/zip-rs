@@ -43,7 +43,7 @@ fn read_zip_file(zip_file: &mut Cursor<Vec<u8>>) -> zip::result::ZipResult<Strin
     let file_names = archive.file_names().collect::<HashSet<_>>();
     assert_eq!(file_names, expected_file_names);
 
-    let mut file = archive.by_name("test/lorem_ipsum.txt")?;
+    let mut file = archive.by_name("test/lorem_ipsum.txt")?.unwrap();
 
     let mut contents = String::new();
     file.read_to_string(&mut contents).unwrap();
