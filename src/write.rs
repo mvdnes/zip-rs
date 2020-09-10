@@ -11,12 +11,97 @@ use std::io;
 use std::io::prelude::*;
 use std::mem;
 
-#[cfg(any(
-    feature = "deflate",
-    feature = "deflate-miniz",
-    feature = "deflate-zlib"
-))]
-use flate2::write::DeflateEncoder;
+#[cfg(feature = "deflate")]
+mod deflate {
+    use miniz_oxide::deflate::core::{
+        compress_to_output, CompressorOxide, TDEFLFlush, TDEFLStatus as Status,
+    };
+    use miniz_oxide::deflate::CompressionLevel;
+    use std::io;
+
+    pub struct Encoder<W> {
+        inner: W,
+        compressor: Box<CompressorOxide>,
+    }
+    impl<W: io::Write> Encoder<W> {
+        pub fn new(inner: W, level: CompressionLevel) -> Self {
+            let mut compressor: Box<CompressorOxide> = Box::default();
+            compressor.set_format_and_level(miniz_oxide::DataFormat::Raw, level as u8);
+            Self { inner, compressor }
+        }
+        pub fn finish(mut self) -> io::Result<W> {
+            io::Write::flush(&mut self)?;
+            Ok(self.inner)
+        }
+    }
+    impl<W: io::Write> io::Write for Encoder<W> {
+        fn write(&mut self, mut buf: &[u8]) -> io::Result<usize> {
+            let Self { inner, compressor } = self;
+            let total = buf.len();
+            let mut err = None;
+            loop {
+                match compress_to_output(compressor, buf, TDEFLFlush::None, |mut compressed| loop {
+                    match inner.write(compressed) {
+                        Ok(0) => return true,
+                        Ok(used) => compressed = &compressed[used..],
+                        Err(e) => {
+                            err = Some(e);
+                            return false;
+                        }
+                    }
+                }) {
+                    (Status::Okay, 0) => {
+                        return Ok(total - buf.len());
+                    }
+                    (Status::Okay, n) => {
+                        buf = &buf[n..];
+                    }
+                    (Status::Done, n) => {
+                        return Ok(total - buf.len() + n);
+                    }
+                    (Status::PutBufFailed, _) => {
+                        return if total > buf.len() {
+                            Ok(total - buf.len())
+                        } else {
+                            // It looks like there are a bunch of paths in miniz_oxide that could get here, but they
+                            // should all really be panics.
+                            Err(err.expect("miniz_oxide returned an unexpected error"))
+                        };
+                    }
+                    (Status::BadParam, _) => panic!("couldn't compress data"),
+                }
+            }
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            let Self { compressor, inner } = self;
+            let mut err = None;
+            loop {
+                match compress_to_output(compressor, &[], TDEFLFlush::Finish, |mut compressed| {
+                    while !compressed.is_empty() {
+                        match inner.write(compressed) {
+                            Ok(0) => {
+                                err = Some(io::ErrorKind::WriteZero.into());
+                                return false;
+                            }
+                            Ok(used) => compressed = &compressed[used..],
+                            Err(e) => {
+                                err = Some(e);
+                                return false;
+                            }
+                        }
+                    }
+                    true
+                }) {
+                    (Status::Okay, 0) | (Status::Done, _) => return self.inner.flush(),
+                    (Status::PutBufFailed, _) => {
+                        return Err(err.expect("miniz_oxide returned an unexpected error"))
+                    }
+                    (_, _) => panic!("couldn't compress data"),
+                }
+            }
+        }
+    }
+}
 
 #[cfg(feature = "bzip2")]
 use bzip2::write::BzEncoder;
@@ -24,12 +109,8 @@ use bzip2::write::BzEncoder;
 enum GenericZipWriter<W: Write + io::Seek> {
     Closed,
     Storer(W),
-    #[cfg(any(
-        feature = "deflate",
-        feature = "deflate-miniz",
-        feature = "deflate-zlib"
-    ))]
-    Deflater(DeflateEncoder<W>),
+    #[cfg(feature = "deflate")]
+    Deflater(deflate::Encoder<W>),
     #[cfg(feature = "bzip2")]
     Bzip2(BzEncoder<W>),
 }
@@ -440,9 +521,9 @@ impl<W: Write + io::Seek> GenericZipWriter<W> {
                     feature = "deflate-miniz",
                     feature = "deflate-zlib"
                 ))]
-                CompressionMethod::Deflated => GenericZipWriter::Deflater(DeflateEncoder::new(
+                CompressionMethod::Deflated => GenericZipWriter::Deflater(deflate::Encoder::new(
                     bare,
-                    flate2::Compression::default(),
+                    miniz_oxide::deflate::CompressionLevel::DefaultLevel,
                 )),
                 #[cfg(feature = "bzip2")]
                 CompressionMethod::Bzip2 => {

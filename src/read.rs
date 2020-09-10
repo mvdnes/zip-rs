@@ -14,12 +14,51 @@ use crate::cp437::FromCp437;
 use crate::types::{DateTime, System, ZipFileData};
 use byteorder::{LittleEndian, ReadBytesExt};
 
-#[cfg(any(
-    feature = "deflate",
-    feature = "deflate-miniz",
-    feature = "deflate-zlib"
-))]
-use flate2::read::DeflateDecoder;
+#[cfg(feature = "deflate")]
+mod deflate {
+    use miniz_oxide::inflate;
+    use std::io;
+
+    pub struct Decoder<R> {
+        data: io::BufReader<R>,
+        decompressor: Box<inflate::stream::InflateState>,
+    }
+    impl<R: io::Read> Decoder<R> {
+        pub fn new(reader: R) -> Self {
+            Self {
+                data: io::BufReader::new(reader),
+                decompressor: Box::default(),
+            }
+        }
+        pub fn into_inner(self) -> R {
+            self.data.into_inner()
+        }
+    }
+    impl<R: io::Read> io::Read for Decoder<R> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            use io::BufRead;
+            let data = self.data.fill_buf()?;
+            let miniz_oxide::StreamResult {
+                bytes_consumed,
+                bytes_written,
+                status,
+            } = inflate::stream::inflate(
+                &mut self.decompressor,
+                data,
+                buf,
+                miniz_oxide::MZFlush::None,
+            );
+
+            match status {
+                Ok(miniz_oxide::MZStatus::Ok) | Ok(miniz_oxide::MZStatus::StreamEnd) => {
+                    self.data.consume(bytes_consumed);
+                    Ok(bytes_written)
+                }
+                alt => panic!("{:?}", alt),
+            }
+        }
+    }
+}
 
 #[cfg(feature = "bzip2")]
 use bzip2::read::BzDecoder;
@@ -86,7 +125,7 @@ enum ZipFileReader<'a> {
         feature = "deflate-miniz",
         feature = "deflate-zlib"
     ))]
-    Deflated(Crc32Reader<flate2::read::DeflateDecoder<CryptoReader<'a>>>),
+    Deflated(Crc32Reader<deflate::Decoder<CryptoReader<'a>>>),
     #[cfg(feature = "bzip2")]
     Bzip2(Crc32Reader<BzDecoder<CryptoReader<'a>>>),
 }
@@ -154,7 +193,7 @@ fn make_reader<'a>(
             feature = "deflate-zlib"
         ))]
         CompressionMethod::Deflated => {
-            let deflate_reader = DeflateDecoder::new(reader);
+            let deflate_reader = deflate::Decoder::new(reader);
             Ok(ZipFileReader::Deflated(Crc32Reader::new(
                 deflate_reader,
                 crc32,
