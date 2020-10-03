@@ -82,46 +82,25 @@ where
     C::Cipher: BlockCipher,
 {
     /// Decrypt or encrypt given data.
-    pub fn crypt(&mut self, mut data: &mut [u8]) {
-        while data.len() > 0 {
-            let mut buffer: [u8; AES_BLOCK_SIZE] = [0u8; AES_BLOCK_SIZE];
-
-            let target_len = data.len().min(AES_BLOCK_SIZE);
-
-            // Fill buffer with enough data to decrypt the next block.
-            debug_assert_eq!(
-                self.read(&mut buffer[0..target_len])
-                    .expect("reading key stream should never fail"),
-                target_len
-            );
-
-            xor(&mut data[0..target_len], &buffer.as_slice()[0..target_len]);
-
-            data = &mut data[target_len..];
-        }
-    }
-}
-
-impl<C> io::Read for AesCtrZipKeyStream<C>
-where
-    C: AesKind,
-    C::Cipher: BlockCipher,
-{
     #[inline]
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        if self.buffer.len() == 0 {
-            // Note: AES block size is always 16 bytes, same as u128.
-            let mut block = GenericArray::clone_from_slice(&self.counter.to_le_bytes());
-            self.cipher.encrypt_block(&mut block);
-            self.counter += 1;
-            self.buffer = block.into_iter().collect();
+    fn crypt(&mut self, mut target: &mut [u8]) {
+        while target.len() > 0 {
+            if self.buffer.len() == 0 {
+                // Note: AES block size is always 16 bytes, same as u128.
+                let mut block = GenericArray::clone_from_slice(&self.counter.to_le_bytes());
+
+                // TODO: Use trait.
+                self.cipher.encrypt_block(&mut block);
+                self.counter += 1;
+                self.buffer = block.into_iter().collect();
+            }
+
+            let target_len = target.len().min(self.buffer.len());
+
+            xor(&mut target[0..target_len], &self.buffer[0..target_len]);
+            self.buffer.drain(0..target_len);
+            target = &mut target[target_len..];
         }
-
-        let target_len = buf.len().min(self.buffer.len());
-
-        buf.copy_from_slice(&self.buffer[0..target_len]);
-        self.buffer.drain(0..target_len);
-        Ok(target_len)
     }
 }
 
@@ -139,26 +118,6 @@ pub fn xor(dest: &mut [u8], src: &[u8]) {
 mod tests {
     use super::{xor, Aes256, AesCtrZipKeyStream};
     use std::io::Read;
-
-    #[test]
-    fn simple_example() {
-        let ciphertext: [u8; 5] = [0xdc, 0x99, 0x93, 0x5e, 0xbf];
-        let expected_plaintext = &[b'a', b's', b'd', b'f', b'\n'];
-        let key = [
-            0xd1, 0x51, 0xa6, 0xab, 0x53, 0x68, 0xd7, 0xb7, 0xbf, 0x49, 0xf7, 0xf5, 0x8a, 0x4e,
-            0x10, 0x36, 0x25, 0x1c, 0x13, 0xba, 0x12, 0x45, 0x37, 0x65, 0xa9, 0xe4, 0xed, 0x9f,
-            0x4a, 0xa8, 0xda, 0x3b,
-        ];
-
-        let mut key_stream = AesCtrZipKeyStream::<Aes256>::new(&key);
-
-        let mut key_buf = [0u8; 5];
-        key_stream.read(&mut key_buf).unwrap();
-
-        let mut plaintext = ciphertext;
-        xor(&mut plaintext, &key_buf);
-        assert_eq!(&plaintext, expected_plaintext);
-    }
 
     #[test]
     fn crypt_simple_example() {
