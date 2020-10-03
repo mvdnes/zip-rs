@@ -1,7 +1,11 @@
 use aes::block_cipher::generic_array::GenericArray;
 use aes::{BlockCipher, NewBlockCipher};
 use arrayvec::{Array, ArrayVec};
+use std::io::Read;
 use std::{any, fmt, io};
+
+/// Internal block size of an AES cipher.
+const AES_BLOCK_SIZE: usize = 16;
 
 /// AES-128.
 #[derive(Debug)]
@@ -72,11 +76,38 @@ where
     }
 }
 
+impl<C> AesCtrZipKeyStream<C>
+where
+    C: AesKind,
+    C::Cipher: BlockCipher,
+{
+    /// Decrypt or encrypt given data.
+    pub fn crypt(&mut self, mut data: &mut [u8]) {
+        while data.len() > 0 {
+            let mut buffer: [u8; AES_BLOCK_SIZE] = [0u8; AES_BLOCK_SIZE];
+
+            let target_len = data.len().min(AES_BLOCK_SIZE);
+
+            // Fill buffer with enough data to decrypt the next block.
+            debug_assert_eq!(
+                self.read(&mut buffer[0..target_len])
+                    .expect("reading key stream should never fail"),
+                target_len
+            );
+
+            xor(&mut data[0..target_len], &buffer.as_slice()[0..target_len]);
+
+            data = &mut data[target_len..];
+        }
+    }
+}
+
 impl<C> io::Read for AesCtrZipKeyStream<C>
 where
     C: AesKind,
     C::Cipher: BlockCipher,
 {
+    #[inline]
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         if self.buffer.len() == 0 {
             // Note: AES block size is always 16 bytes, same as u128.
@@ -94,10 +125,11 @@ where
     }
 }
 
-#[cfg(test)]
 /// XORs a slice in place with another slice.
 #[inline]
 pub fn xor(dest: &mut [u8], src: &[u8]) {
+    debug_assert_eq!(dest.len(), src.len());
+
     for (lhs, rhs) in dest.iter_mut().zip(src.iter()) {
         *lhs ^= *rhs;
     }
@@ -124,11 +156,24 @@ mod tests {
         key_stream.read(&mut key_buf).unwrap();
 
         let mut plaintext = ciphertext;
-        eprintln!("{:?}", plaintext);
-
         xor(&mut plaintext, &key_buf);
-        eprintln!("{:?}", plaintext);
+        assert_eq!(&plaintext, expected_plaintext);
+    }
 
+    #[test]
+    fn crypt_simple_example() {
+        let ciphertext: [u8; 5] = [0xdc, 0x99, 0x93, 0x5e, 0xbf];
+        let expected_plaintext = &[b'a', b's', b'd', b'f', b'\n'];
+        let key = [
+            0xd1, 0x51, 0xa6, 0xab, 0x53, 0x68, 0xd7, 0xb7, 0xbf, 0x49, 0xf7, 0xf5, 0x8a, 0x4e,
+            0x10, 0x36, 0x25, 0x1c, 0x13, 0xba, 0x12, 0x45, 0x37, 0x65, 0xa9, 0xe4, 0xed, 0x9f,
+            0x4a, 0xa8, 0xda, 0x3b,
+        ];
+
+        let mut key_stream = AesCtrZipKeyStream::<Aes256>::new(&key);
+
+        let mut plaintext = ciphertext;
+        key_stream.crypt(&mut plaintext);
         assert_eq!(&plaintext, expected_plaintext);
     }
 }
