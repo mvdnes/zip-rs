@@ -242,6 +242,8 @@ pub struct ZipFileData {
     pub data_start: u64,
     /// External file attributes
     pub external_attributes: u32,
+    /// AES mode if applicable
+    pub aes_mode: Option<AesMode>,
 }
 
 impl ZipFileData {
@@ -284,6 +286,28 @@ impl ZipFileData {
     }
 }
 
+/// AES variant used.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum AesMode {
+    Aes128,
+    Aes192,
+    Aes256,
+}
+
+impl AesMode {
+    pub fn salt_length(&self) -> u64 {
+        self.key_length() / 2
+    }
+
+    pub fn key_length(&self) -> u64 {
+        match self {
+            Self::Aes128 => 16,
+            Self::Aes192 => 24,
+            Self::Aes256 => 32,
+        }
+    }
+}
+
 #[cfg(test)]
 mod test {
     #[test]
@@ -315,6 +339,7 @@ mod test {
             data_start: 0,
             central_header_start: 0,
             external_attributes: 0,
+            aes_mode: None,
         };
         assert_eq!(
             data.file_name_sanitized(),

@@ -1,17 +1,18 @@
 //! Types for reading ZIP archives
 
+use crate::aes::{AesReaderValid, AesReader};
 use crate::compression::CompressionMethod;
+use crate::cp437::FromCp437;
 use crate::crc32::Crc32Reader;
 use crate::result::{InvalidPassword, ZipError, ZipResult};
 use crate::spec;
+use crate::types::{AesMode, DateTime, System, ZipFileData};
 use crate::zipcrypto::ZipCryptoReader;
 use crate::zipcrypto::ZipCryptoReaderValid;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::{self, prelude::*};
 
-use crate::cp437::FromCp437;
-use crate::types::{DateTime, System, ZipFileData};
 use byteorder::{LittleEndian, ReadBytesExt};
 
 #[cfg(any(
@@ -57,6 +58,7 @@ pub struct ZipArchive<R: Read + io::Seek> {
 enum CryptoReader<'a> {
     Plaintext(io::Take<&'a mut dyn Read>),
     ZipCrypto(ZipCryptoReaderValid<io::Take<&'a mut dyn Read>>),
+    Aes(AesReaderValid<io::Take<&'a mut dyn Read>>),
 }
 
 impl<'a> Read for CryptoReader<'a> {
@@ -64,6 +66,7 @@ impl<'a> Read for CryptoReader<'a> {
         match self {
             CryptoReader::Plaintext(r) => r.read(buf),
             CryptoReader::ZipCrypto(r) => r.read(buf),
+            CryptoReader::Aes(r) => r.read(buf),
         }
     }
 }
@@ -74,6 +77,7 @@ impl<'a> CryptoReader<'a> {
         match self {
             CryptoReader::Plaintext(r) => r,
             CryptoReader::ZipCrypto(r) => r.into_inner(),
+            CryptoReader::Aes(r) => r.into_inner(),
         }
     }
 }
@@ -137,13 +141,21 @@ fn make_reader<'a>(
     crc32: u32,
     reader: io::Take<&'a mut dyn io::Read>,
     password: Option<&[u8]>,
+    aes_mode: Option<AesMode>,
+    compressed_size: u64,
 ) -> ZipResult<Result<ZipFileReader<'a>, InvalidPassword>> {
-    let reader = match password {
-        None => CryptoReader::Plaintext(reader),
-        Some(password) => match ZipCryptoReader::new(reader, password).validate(crc32)? {
+    let reader = match (password, aes_mode) {
+        (None, _) => CryptoReader::Plaintext(reader),
+        (Some(password), None) => match ZipCryptoReader::new(reader, password).validate(crc32)? {
             None => return Ok(Err(InvalidPassword)),
             Some(r) => CryptoReader::ZipCrypto(r),
         },
+        (Some(password), Some(aes_mode)) => {
+            match AesReader::new(reader, aes_mode, compressed_size).validate(&password)? {
+                None => return Ok(Err(InvalidPassword)),
+                Some(r) => CryptoReader::Aes(r),
+            }
+        }
     };
 
     match compression_method {
@@ -420,7 +432,14 @@ impl<R: Read + io::Seek> ZipArchive<R> {
         self.reader.seek(io::SeekFrom::Start(data.data_start))?;
         let limit_reader = (self.reader.by_ref() as &mut dyn Read).take(data.compressed_size);
 
-        match make_reader(data.compression_method, data.crc32, limit_reader, password) {
+        match make_reader(
+            data.compression_method,
+            data.crc32,
+            limit_reader,
+            password,
+            data.aes_mode,
+            data.compressed_size
+        ) {
             Ok(Ok(reader)) => Ok(Ok(ZipFile {
                 reader,
                 data: Cow::Borrowed(data),
@@ -507,11 +526,20 @@ fn central_header_to_zip_file<R: Read + io::Seek>(
         central_header_start,
         data_start: 0,
         external_attributes: external_file_attributes,
+        aes_mode: None,
     };
+
+    let aes_enabled = result.compression_method == CompressionMethod::AES;
 
     match parse_extra_field(&mut result, &*extra_field) {
         Ok(..) | Err(ZipError::Io(..)) => {}
         Err(e) => return Err(e),
+    }
+
+    if aes_enabled && result.aes_mode.is_none() {
+        return Err(ZipError::InvalidArchive(
+            "AES encryption without AES extra data field",
+        ));
     }
 
     // Account for shifted zip offsets.
@@ -527,22 +555,51 @@ fn parse_extra_field(file: &mut ZipFileData, data: &[u8]) -> ZipResult<()> {
         let kind = reader.read_u16::<LittleEndian>()?;
         let len = reader.read_u16::<LittleEndian>()?;
         let mut len_left = len as i64;
-        // Zip64 extended information extra field
-        if kind == 0x0001 {
-            if file.uncompressed_size == 0xFFFFFFFF {
-                file.uncompressed_size = reader.read_u64::<LittleEndian>()?;
-                len_left -= 8;
+        match kind {
+            // Zip64 extended information extra field
+            0x0001 => {
+                if file.uncompressed_size == 0xFFFFFFFF {
+                    file.uncompressed_size = reader.read_u64::<LittleEndian>()?;
+                    len_left -= 8;
+                }
+                if file.compressed_size == 0xFFFFFFFF {
+                    file.compressed_size = reader.read_u64::<LittleEndian>()?;
+                    len_left -= 8;
+                }
+                if file.header_start == 0xFFFFFFFF {
+                    file.header_start = reader.read_u64::<LittleEndian>()?;
+                    len_left -= 8;
+                }
             }
-            if file.compressed_size == 0xFFFFFFFF {
-                file.compressed_size = reader.read_u64::<LittleEndian>()?;
-                len_left -= 8;
+            0x9901 => {
+                // AES
+                if len != 7 {
+                    return Err(ZipError::UnsupportedArchive(
+                        "AES extra data field has an unsupported length",
+                    ));
+                }
+                let _vendor_version = reader.read_u16::<LittleEndian>()?; // TODO: CRC value handling changes
+                let vendor_id = reader.read_u16::<LittleEndian>()?;
+                let aes_mode = reader.read_u8()?;
+                let compression_method = reader.read_u16::<LittleEndian>()?;
+
+                if vendor_id != 0x4541 {
+                    return Err(ZipError::InvalidArchive("Invalid AES vendor"));
+                }
+                match aes_mode {
+                    0x01 => file.aes_mode = Some(AesMode::Aes128),
+                    0x02 => file.aes_mode = Some(AesMode::Aes192),
+                    0x03 => file.aes_mode = Some(AesMode::Aes256),
+                    _ => return Err(ZipError::InvalidArchive("Invalid AES encryption strength")),
+                };
+                file.compression_method = {
+                    #[allow(deprecated)]
+                    CompressionMethod::from_u16(compression_method)
+                };
             }
-            if file.header_start == 0xFFFFFFFF {
-                file.header_start = reader.read_u64::<LittleEndian>()?;
-                len_left -= 8;
+            _ => {
+                // Other fields are ignored
             }
-            // Unparsed fields:
-            // u32: disk start number
         }
 
         // We could also check for < 0 to check for errors
@@ -771,6 +828,7 @@ pub fn read_zipfile_from_stream<'a, R: io::Read>(
         // We set this to zero, which should be valid as the docs state 'If input came
         // from standard input, this field is set to zero.'
         external_attributes: 0,
+        aes_mode: None,
     };
 
     match parse_extra_field(&mut result, &extra_field) {
@@ -789,9 +847,18 @@ pub fn read_zipfile_from_stream<'a, R: io::Read>(
 
     let result_crc32 = result.crc32;
     let result_compression_method = result.compression_method;
+    let result_compressed_size = result.compressed_size;
     Ok(Some(ZipFile {
         data: Cow::Owned(result),
-        reader: make_reader(result_compression_method, result_crc32, limit_reader, None)?.unwrap(),
+        reader: make_reader(
+            result_compression_method,
+            result_crc32,
+            limit_reader,
+            None,
+            None,
+            result_compressed_size
+        )?
+        .unwrap(),
     }))
 }
 
