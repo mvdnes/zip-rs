@@ -1,86 +1,134 @@
+use crate::aes_ctr;
 use crate::types::AesMode;
-use std::io;
-
-use byteorder::{LittleEndian, ReadBytesExt};
-use hmac::Hmac;
+use hmac::{Hmac, Mac, NewMac};
 use sha1::Sha1;
+use std::io::{Error, Read};
 
 /// The length of the password verifcation value in bytes
-const PWD_VERIFY_LENGTH: u64 = 2;
+const PWD_VERIFY_LENGTH: usize = 2;
 /// The length of the authentication code in bytes
-const AUTH_CODE_LENGTH: u64 = 10;
+const AUTH_CODE_LENGTH: usize = 10;
 /// The number of iterations used with PBKDF2
 const ITERATION_COUNT: u32 = 1000;
-/// AES block size in bytes
-const BLOCK_SIZE: usize = 16;
+
+fn cipher_from_mode(aes_mode: AesMode, key: &[u8]) -> Box<dyn aes_ctr::AesCipher> {
+    match aes_mode {
+        AesMode::Aes128 => Box::new(aes_ctr::AesCtrZipKeyStream::<aes_ctr::Aes128>::new(key))
+            as Box<dyn aes_ctr::AesCipher>,
+        AesMode::Aes192 => Box::new(aes_ctr::AesCtrZipKeyStream::<aes_ctr::Aes192>::new(key))
+            as Box<dyn aes_ctr::AesCipher>,
+        AesMode::Aes256 => Box::new(aes_ctr::AesCtrZipKeyStream::<aes_ctr::Aes256>::new(key))
+            as Box<dyn aes_ctr::AesCipher>,
+    }
+}
 
 // an aes encrypted file starts with a salt, whose length depends on the used aes mode
 // followed by a 2 byte password verification value
 // then the variable length encrypted data
 // and lastly a 10 byte authentication code
-pub(crate) struct AesReader<R> {
+pub struct AesReader<R> {
     reader: R,
     aes_mode: AesMode,
-    salt_length: usize,
     data_length: u64,
 }
 
-impl<R: io::Read> AesReader<R> {
+impl<R: Read> AesReader<R> {
     pub fn new(reader: R, aes_mode: AesMode, compressed_size: u64) -> AesReader<R> {
-        let salt_length = aes_mode.salt_length();
-        let data_length = compressed_size - (PWD_VERIFY_LENGTH + AUTH_CODE_LENGTH + salt_length);
+        let data_length = compressed_size
+            - (PWD_VERIFY_LENGTH + AUTH_CODE_LENGTH + aes_mode.salt_length()) as u64;
 
         Self {
             reader,
             aes_mode,
-            salt_length: salt_length as usize,
             data_length,
         }
     }
 
-    pub fn validate(mut self, password: &[u8]) -> Result<Option<AesReaderValid<R>>, io::Error> {
-        // the length of the salt depends on the used key size
-        let mut salt = vec![0; self.salt_length as usize];
-        self.reader.read_exact(&mut salt).unwrap();
+    /// Read the AES header bytes and validate the password.
+    ///
+    /// Even if the validation succeeds, there is still a 1 in 65536 chance that an incorrect
+    /// password was provided.
+    /// It isn't possible to check the authentication code in this step. This will be done after
+    /// reading and decrypting the file.
+    pub fn validate(mut self, password: &[u8]) -> Result<Option<AesReaderValid<R>>, Error> {
+
+        let salt_length = self.aes_mode.salt_length();
+        let key_length = self.aes_mode.key_length();
+
+        let mut salt = vec![0; salt_length];
+        self.reader.read_exact(&mut salt)?;
 
         // next are 2 bytes used for password verification
-        let mut pwd_verification_value = vec![0; PWD_VERIFY_LENGTH as usize];
-        self.reader.read_exact(&mut pwd_verification_value).unwrap();
+        let mut pwd_verification_value = vec![0; PWD_VERIFY_LENGTH];
+        self.reader.read_exact(&mut pwd_verification_value)?;
 
         // derive a key from the password and salt
         // the length depends on the aes key length
-        let derived_key_len = (2 * self.aes_mode.key_length() + PWD_VERIFY_LENGTH) as usize;
+        let derived_key_len = 2 * key_length + PWD_VERIFY_LENGTH;
         let mut derived_key: Vec<u8> = vec![0; derived_key_len];
 
         // use PBKDF2 with HMAC-Sha1 to derive the key
         pbkdf2::pbkdf2::<Hmac<Sha1>>(password, &salt, ITERATION_COUNT, &mut derived_key);
+        let decrypt_key = &derived_key[0..key_length];
+        let hmac_key = &derived_key[key_length..key_length * 2];
+        let pwd_verify = &derived_key[derived_key_len - 2..];
 
         // the last 2 bytes should equal the password verification value
-        if pwd_verification_value != &derived_key[derived_key_len - 2..] {
+        if pwd_verification_value != pwd_verify {
             // wrong password
             return Ok(None);
         }
 
-        // the first key_length bytes are used as decryption key
-        let decrypt_key = &derived_key[0..self.aes_mode.key_length() as usize];
+        let cipher = cipher_from_mode(self.aes_mode, &decrypt_key);
+        let hmac = Hmac::<Sha1>::new_varkey(hmac_key).unwrap();
 
-        panic!("Validating AesReader");
+        Ok(Some(AesReaderValid {
+            reader: self.reader,
+            data_remaining: self.data_length,
+            cipher,
+            hmac,
+        }))
     }
 }
 
-pub(crate) struct AesReaderValid<R> {
-    reader: AesReader<R>,
+pub struct AesReaderValid<R: Read> {
+    reader: R,
+    data_remaining: u64,
+    cipher: Box<dyn aes_ctr::AesCipher>,
+    hmac: Hmac<Sha1>,
 }
 
-impl<R: io::Read> io::Read for AesReaderValid<R> {
-    fn read(&mut self, mut buf: &mut [u8]) -> std::io::Result<usize> {
-        panic!("Reading from AesReaderValid")
+impl<R: Read> Read for AesReaderValid<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        // get the number of bytes to read, compare as u64 to make sure we can read more than
+        // 2^32 bytes even on 32 bit systems.
+        let bytes_to_read = self.data_remaining.min(buf.len() as u64) as usize;
+        let read = self.reader.read(&mut buf[0..bytes_to_read])?;
+
+        self.cipher.crypt_in_place(&mut buf[0..read]);
+        self.data_remaining -= read as u64;
+
+        // Update the hmac with the decrypted data
+        self.hmac.update(&buf[0..read]);
+        if self.data_remaining <= 0 {
+            // if there is no data left to read, check the integrity of the data
+            let mut read_auth = [0; 10];
+            self.reader.read_exact(&mut read_auth)?;
+            let computed_auth = self.hmac.finalize_reset();
+            // FIXME: The mac uses the whole sha1 hash each step
+            //        Zip uses HMAC-Sha1-80, which throws away the second half each time
+            //        see https://www.winzip.com/win/en/aes_info.html#auth-faq
+            // if computed_auth.into_bytes().as_slice() != &read_auth {
+            // }
+        }
+
+        Ok(read)
     }
 }
 
-impl<R: io::Read> AesReaderValid<R> {
+impl<R: Read> AesReaderValid<R> {
     /// Consumes this decoder, returning the underlying reader.
     pub fn into_inner(self) -> R {
-        self.reader.reader
+        self.reader
     }
 }

@@ -295,11 +295,11 @@ pub enum AesMode {
 }
 
 impl AesMode {
-    pub fn salt_length(&self) -> u64 {
+    pub fn salt_length(&self) -> usize {
         self.key_length() / 2
     }
 
-    pub fn key_length(&self) -> u64 {
+    pub fn key_length(&self) -> usize {
         match self {
             Self::Aes128 => 16,
             Self::Aes192 => 24,
