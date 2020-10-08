@@ -159,7 +159,11 @@ fn make_reader<'a>(
     };
 
     match compression_method {
-        CompressionMethod::Stored => Ok(Ok(ZipFileReader::Stored(Crc32Reader::new(reader, crc32)))),
+        CompressionMethod::Stored => Ok(Ok(ZipFileReader::Stored(Crc32Reader::new(
+            reader,
+            crc32,
+            aes_mode.is_some(),
+        )))),
         #[cfg(any(
             feature = "deflate",
             feature = "deflate-miniz",
@@ -170,6 +174,7 @@ fn make_reader<'a>(
             Ok(Ok(ZipFileReader::Deflated(Crc32Reader::new(
                 deflate_reader,
                 crc32,
+                aes_mode.is_some(),
             ))))
         }
         #[cfg(feature = "bzip2")]
@@ -178,6 +183,7 @@ fn make_reader<'a>(
             Ok(Ok(ZipFileReader::Bzip2(Crc32Reader::new(
                 bzip2_reader,
                 crc32,
+                aes_mode.is_some(),
             ))))
         }
         _ => unsupported_zip_error("Compression method not supported"),
