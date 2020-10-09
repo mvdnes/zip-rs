@@ -1,8 +1,10 @@
 use crate::aes_ctr;
 use crate::types::AesMode;
+
+use constant_time_eq::constant_time_eq;
 use hmac::{Hmac, Mac, NewMac};
 use sha1::Sha1;
-use std::io::{Error, Read};
+use std::io::{self, Read};
 
 /// The length of the password verifcation value in bytes
 const PWD_VERIFY_LENGTH: usize = 2;
@@ -50,7 +52,7 @@ impl<R: Read> AesReader<R> {
     /// password was provided.
     /// It isn't possible to check the authentication code in this step. This will be done after
     /// reading and decrypting the file.
-    pub fn validate(mut self, password: &[u8]) -> Result<Option<AesReaderValid<R>>, Error> {
+    pub fn validate(mut self, password: &[u8]) -> io::Result<Option<AesReaderValid<R>>> {
 
         let salt_length = self.aes_mode.salt_length();
         let key_length = self.aes_mode.key_length();
@@ -99,27 +101,40 @@ pub struct AesReaderValid<R: Read> {
 }
 
 impl<R: Read> Read for AesReaderValid<R> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.data_remaining == 0 {
+            return Ok(0);
+        }
+
         // get the number of bytes to read, compare as u64 to make sure we can read more than
         // 2^32 bytes even on 32 bit systems.
         let bytes_to_read = self.data_remaining.min(buf.len() as u64) as usize;
         let read = self.reader.read(&mut buf[0..bytes_to_read])?;
 
+        // Update the hmac with the encrypted data
+        self.hmac.update(&buf[0..read]);
+
+        // decrypt the data
         self.cipher.crypt_in_place(&mut buf[0..read]);
         self.data_remaining -= read as u64;
 
-        // Update the hmac with the decrypted data
-        self.hmac.update(&buf[0..read]);
-        if self.data_remaining <= 0 {
-            // if there is no data left to read, check the integrity of the data
-            let mut read_auth = [0; 10];
-            self.reader.read_exact(&mut read_auth)?;
-            let computed_auth = self.hmac.finalize_reset();
-            // FIXME: The mac uses the whole sha1 hash each step
-            //        Zip uses HMAC-Sha1-80, which throws away the second half each time
-            //        see https://www.winzip.com/win/en/aes_info.html#auth-faq
-            // if computed_auth.into_bytes().as_slice() != &read_auth {
-            // }
+        // if there is no data left to read, check the integrity of the data
+        if self.data_remaining == 0 {
+            // Zip uses HMAC-Sha1-80, which only uses the first half of the hash
+            // see https://www.winzip.com/win/en/aes_info.html#auth-faq
+            let mut read_auth_code = [0; AUTH_CODE_LENGTH];
+            self.reader.read_exact(&mut read_auth_code)?;
+            let computed_auth_code = &self.hmac.finalize_reset().into_bytes()[0..AUTH_CODE_LENGTH];
+
+            // use constant time comparison to mitigate timing attacks
+            if !constant_time_eq(computed_auth_code, &read_auth_code) {
+                return Err(
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "Invalid authentication code, this could be due to an invalid password or errors in the data"
+                    )
+                );
+            }
         }
 
         Ok(read)

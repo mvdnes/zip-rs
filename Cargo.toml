@@ -15,6 +15,7 @@ edition = "2018"
 aes = "0.5.0"
 byteorder = "1.3"
 bzip2 = { version = "0.3", optional = true }
+constant_time_eq = "0.1.5"
 crc32fast = "1.0"
 # FIXME(#170): flate2 1.0.15 has an MSRV of 1.36.0, breaking ours. We'll update when we know if this will be addressed
 flate2 = { version = ">=1.0.0, <=1.0.14", default-features = false, optional = true }
