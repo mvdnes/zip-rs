@@ -12,17 +12,18 @@ pub struct Crc32Reader<R> {
     check: u32,
     /// Signals if `inner` stores aes encrypted data.
     /// AE-2 encrypted data doesn't use crc and sets the value to 0.
-    aes_encrypted: bool,
+    ae2_encrypted: bool,
 }
 
 impl<R> Crc32Reader<R> {
-    /// Get a new Crc32Reader which check the inner reader against checksum.
-    pub fn new(inner: R, checksum: u32, aes_encrypted: bool) -> Crc32Reader<R> {
+    /// Get a new Crc32Reader which checks the inner reader against checksum.
+    /// The check is disabled if `ae2_encrypted == true`.
+    pub fn new(inner: R, checksum: u32, ae2_encrypted: bool) -> Crc32Reader<R> {
         Crc32Reader {
             inner,
             hasher: Hasher::new(),
             check: checksum,
-            aes_encrypted,
+            ae2_encrypted,
         }
     }
 
@@ -38,7 +39,7 @@ impl<R> Crc32Reader<R> {
 impl<R: Read> Read for Crc32Reader<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let count = match self.inner.read(buf) {
-            Ok(0) if !buf.is_empty() && !self.check_matches() && !self.aes_encrypted => {
+            Ok(0) if !buf.is_empty() && !self.check_matches() && !self.ae2_encrypted => {
                 return Err(io::Error::new(io::ErrorKind::Other, "Invalid checksum"))
             }
             Ok(n) => n,

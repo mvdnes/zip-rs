@@ -243,7 +243,7 @@ pub struct ZipFileData {
     /// External file attributes
     pub external_attributes: u32,
     /// AES mode if applicable
-    pub aes_mode: Option<AesMode>,
+    pub aes_mode: Option<(AesMode, AesVendorVersion)>,
 }
 
 impl ZipFileData {
@@ -286,8 +286,14 @@ impl ZipFileData {
     }
 }
 
+#[derive(Copy, Clone, Debug)]
+pub enum AesVendorVersion {
+    Ae1,
+    Ae2,
+}
+
 /// AES variant used.
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug)]
 pub enum AesMode {
     Aes128,
     Aes192,
