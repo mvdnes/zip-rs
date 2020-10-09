@@ -97,7 +97,7 @@ where
     /// Decrypt or encrypt given data.
     #[inline]
     fn crypt_in_place(&mut self, mut target: &mut [u8]) {
-        while target.len() > 0 {
+        while !target.is_empty() {
             if self.pos == AES_BLOCK_SIZE {
                 // Note: AES block size is always 16 bytes, same as u128.
                 self.buffer

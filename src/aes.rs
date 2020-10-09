@@ -53,7 +53,6 @@ impl<R: Read> AesReader<R> {
     /// It isn't possible to check the authentication code in this step. This will be done after
     /// reading and decrypting the file.
     pub fn validate(mut self, password: &[u8]) -> io::Result<Option<AesReaderValid<R>>> {
-
         let salt_length = self.aes_mode.salt_length();
         let key_length = self.aes_mode.key_length();
 

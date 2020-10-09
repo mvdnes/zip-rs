@@ -1,6 +1,6 @@
 //! Types for reading ZIP archives
 
-use crate::aes::{AesReaderValid, AesReader};
+use crate::aes::{AesReader, AesReaderValid};
 use crate::compression::CompressionMethod;
 use crate::cp437::FromCp437;
 use crate::crc32::Crc32Reader;
@@ -55,6 +55,7 @@ pub struct ZipArchive<R: Read + io::Seek> {
     comment: Vec<u8>,
 }
 
+#[allow(clippy::large_enum_variant)]
 enum CryptoReader<'a> {
     Plaintext(io::Take<&'a mut dyn Read>),
     ZipCrypto(ZipCryptoReaderValid<io::Take<&'a mut dyn Read>>),
@@ -308,7 +309,7 @@ impl<R: Read + io::Seek> ZipArchive<R> {
         let mut files = Vec::new();
         let mut names_map = HashMap::new();
 
-        if let Err(_) = reader.seek(io::SeekFrom::Start(directory_start)) {
+        if reader.seek(io::SeekFrom::Start(directory_start)).is_err() {
             return Err(ZipError::InvalidArchive(
                 "Could not seek to start of central directory",
             ));
@@ -444,7 +445,7 @@ impl<R: Read + io::Seek> ZipArchive<R> {
             limit_reader,
             password,
             data.aes_mode,
-            data.compressed_size
+            data.compressed_size,
         ) {
             Ok(Ok(reader)) => Ok(Ok(ZipFile {
                 reader,
@@ -862,7 +863,7 @@ pub fn read_zipfile_from_stream<'a, R: io::Read>(
             limit_reader,
             None,
             None,
-            result_compressed_size
+            result_compressed_size,
         )?
         .unwrap(),
     }))
