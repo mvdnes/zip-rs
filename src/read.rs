@@ -159,10 +159,7 @@ fn make_reader<'a>(
         }
     };
 
-    let ae2_encrypted = match aes_info {
-        Some((_, AesVendorVersion::Ae2)) => true,
-        _ => false,
-    };
+    let ae2_encrypted = matches!(aes_info, Some((_, AesVendorVersion::Ae2)));
 
     match compression_method {
         CompressionMethod::Stored => Ok(Ok(ZipFileReader::Stored(Crc32Reader::new(
@@ -935,9 +932,8 @@ mod test {
         v.extend_from_slice(include_bytes!("../tests/data/mimetype.zip"));
         let mut reader = io::Cursor::new(v);
         loop {
-            match read_zipfile_from_stream(&mut reader).unwrap() {
-                None => break,
-                _ => (),
+            if read_zipfile_from_stream(&mut reader).unwrap().is_none() {
+                break;
             }
         }
     }
