@@ -1,12 +1,13 @@
 //! Types for reading ZIP archives
 
-use crate::aes::{AesReader, AesReaderValid};
+#[cfg(feature = "aes-crypto")]
+use crate::aes::{AesMode, AesReader, AesReaderValid, AesVendorVersion};
 use crate::compression::CompressionMethod;
 use crate::cp437::FromCp437;
 use crate::crc32::Crc32Reader;
 use crate::result::{InvalidPassword, ZipError, ZipResult};
 use crate::spec;
-use crate::types::{AesMode, AesVendorVersion, DateTime, System, ZipFileData};
+use crate::types::{DateTime, System, ZipFileData};
 use crate::zipcrypto::ZipCryptoReader;
 use crate::zipcrypto::ZipCryptoReaderValid;
 use std::borrow::Cow;
@@ -59,6 +60,7 @@ pub struct ZipArchive<R: Read + io::Seek> {
 enum CryptoReader<'a> {
     Plaintext(io::Take<&'a mut dyn Read>),
     ZipCrypto(ZipCryptoReaderValid<io::Take<&'a mut dyn Read>>),
+    #[cfg(feature = "aes-crypto")]
     Aes(AesReaderValid<io::Take<&'a mut dyn Read>>),
 }
 
@@ -67,6 +69,7 @@ impl<'a> Read for CryptoReader<'a> {
         match self {
             CryptoReader::Plaintext(r) => r.read(buf),
             CryptoReader::ZipCrypto(r) => r.read(buf),
+            #[cfg(feature = "aes-crypto")]
             CryptoReader::Aes(r) => r.read(buf),
         }
     }
@@ -78,6 +81,7 @@ impl<'a> CryptoReader<'a> {
         match self {
             CryptoReader::Plaintext(r) => r,
             CryptoReader::ZipCrypto(r) => r.into_inner(),
+            #[cfg(feature = "aes-crypto")]
             CryptoReader::Aes(r) => r.into_inner(),
         }
     }
@@ -142,29 +146,35 @@ fn make_reader<'a>(
     crc32: u32,
     reader: io::Take<&'a mut dyn io::Read>,
     password: Option<&[u8]>,
-    aes_info: Option<(AesMode, AesVendorVersion)>,
-    compressed_size: u64,
+    #[cfg(feature = "aes-crypto")] aes_info: Option<(AesMode, AesVendorVersion)>,
+    #[cfg(feature = "aes-crypto")] compressed_size: u64,
 ) -> ZipResult<Result<ZipFileReader<'a>, InvalidPassword>> {
+    #[cfg(not(feature = "aes-crypto"))]
+    let aes_info: Option<()> = None;
+
     let reader = match (password, aes_info) {
-        (None, _) => CryptoReader::Plaintext(reader),
-        (Some(password), None) => match ZipCryptoReader::new(reader, password).validate(crc32)? {
-            None => return Ok(Err(InvalidPassword)),
-            Some(r) => CryptoReader::ZipCrypto(r),
-        },
+        #[cfg(feature = "aes-crypto")]
         (Some(password), Some((aes_mode, _))) => {
             match AesReader::new(reader, aes_mode, compressed_size).validate(&password)? {
                 None => return Ok(Err(InvalidPassword)),
                 Some(r) => CryptoReader::Aes(r),
             }
         }
+        (Some(password), None) => match ZipCryptoReader::new(reader, password).validate(crc32)? {
+            None => return Ok(Err(InvalidPassword)),
+            Some(r) => CryptoReader::ZipCrypto(r),
+        },
+        _ => CryptoReader::Plaintext(reader),
     };
 
+    #[cfg(feature = "aes-crypto")]
     let ae2_encrypted = matches!(aes_info, Some((_, AesVendorVersion::Ae2)));
 
     match compression_method {
         CompressionMethod::Stored => Ok(Ok(ZipFileReader::Stored(Crc32Reader::new(
             reader,
             crc32,
+            #[cfg(feature = "aes-crypto")]
             ae2_encrypted,
         )))),
         #[cfg(any(
@@ -177,6 +187,7 @@ fn make_reader<'a>(
             Ok(Ok(ZipFileReader::Deflated(Crc32Reader::new(
                 deflate_reader,
                 crc32,
+                #[cfg(feature = "aes-crypto")]
                 ae2_encrypted,
             ))))
         }
@@ -186,6 +197,7 @@ fn make_reader<'a>(
             Ok(Ok(ZipFileReader::Bzip2(Crc32Reader::new(
                 bzip2_reader,
                 crc32,
+                #[cfg(feature = "aes-crypto")]
                 ae2_encrypted,
             ))))
         }
@@ -446,7 +458,9 @@ impl<R: Read + io::Seek> ZipArchive<R> {
             data.crc32,
             limit_reader,
             password,
+            #[cfg(feature = "aes-crypto")]
             data.aes_mode,
+            #[cfg(feature = "aes-crypto")]
             data.compressed_size,
         ) {
             Ok(Ok(reader)) => Ok(Ok(ZipFile {
@@ -535,9 +549,11 @@ fn central_header_to_zip_file<R: Read + io::Seek>(
         central_header_start,
         data_start: 0,
         external_attributes: external_file_attributes,
+        #[cfg(feature = "aes-crypto")]
         aes_mode: None,
     };
 
+    #[cfg(feature = "aes-crypto")]
     let aes_enabled = result.compression_method == CompressionMethod::AES;
 
     match parse_extra_field(&mut result, &*extra_field) {
@@ -545,6 +561,7 @@ fn central_header_to_zip_file<R: Read + io::Seek>(
         Err(e) => return Err(e),
     }
 
+    #[cfg(feature = "aes-crypto")]
     if aes_enabled && result.aes_mode.is_none() {
         return Err(ZipError::InvalidArchive(
             "AES encryption without AES extra data field",
@@ -580,6 +597,7 @@ fn parse_extra_field(file: &mut ZipFileData, data: &[u8]) -> ZipResult<()> {
                     len_left -= 8;
                 }
             }
+            #[cfg(feature = "aes-crypto")]
             0x9901 => {
                 // AES
                 if len != 7 {
@@ -842,6 +860,7 @@ pub fn read_zipfile_from_stream<'a, R: io::Read>(
         // We set this to zero, which should be valid as the docs state 'If input came
         // from standard input, this field is set to zero.'
         external_attributes: 0,
+        #[cfg(feature = "aes-crypto")]
         aes_mode: None,
     };
 
@@ -861,6 +880,7 @@ pub fn read_zipfile_from_stream<'a, R: io::Read>(
 
     let result_crc32 = result.crc32;
     let result_compression_method = result.compression_method;
+    #[cfg(feature = "aes-crypto")]
     let result_compressed_size = result.compressed_size;
     Ok(Some(ZipFile {
         data: Cow::Owned(result),
@@ -869,7 +889,9 @@ pub fn read_zipfile_from_stream<'a, R: io::Read>(
             result_crc32,
             limit_reader,
             None,
+            #[cfg(feature = "aes-crypto")]
             None,
+            #[cfg(feature = "aes-crypto")]
             result_compressed_size,
         )?
         .unwrap(),

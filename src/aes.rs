@@ -1,5 +1,4 @@
 use crate::aes_ctr;
-use crate::types::AesMode;
 
 use constant_time_eq::constant_time_eq;
 use hmac::{Hmac, Mac, NewMac};
@@ -24,7 +23,38 @@ fn cipher_from_mode(aes_mode: AesMode, key: &[u8]) -> Box<dyn aes_ctr::AesCipher
     }
 }
 
-// an aes encrypted file starts with a salt, whose length depends on the used aes mode
+#[cfg(feature = "aes-crypto")]
+#[derive(Copy, Clone, Debug)]
+pub enum AesVendorVersion {
+    Ae1,
+    Ae2,
+}
+
+#[cfg(feature = "aes-crypto")]
+/// AES variant used.
+#[derive(Copy, Clone, Debug)]
+pub enum AesMode {
+    Aes128,
+    Aes192,
+    Aes256,
+}
+
+#[cfg(feature = "aes-crypto")]
+impl AesMode {
+    pub fn salt_length(&self) -> usize {
+        self.key_length() / 2
+    }
+
+    pub fn key_length(&self) -> usize {
+        match self {
+            Self::Aes128 => 16,
+            Self::Aes192 => 24,
+            Self::Aes256 => 32,
+        }
+    }
+}
+
+// An aes encrypted file starts with a salt, whose length depends on the used aes mode
 // followed by a 2 byte password verification value
 // then the variable length encrypted data
 // and lastly a 10 byte authentication code
