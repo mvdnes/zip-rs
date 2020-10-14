@@ -171,14 +171,12 @@ fn make_reader<'a>(
         (None, None) => CryptoReader::Plaintext(reader),
     };
 
-    #[cfg(feature = "aes-crypto")]
     let ae2_encrypted = matches!(aes_info, Some((_, AesVendorVersion::Ae2)));
 
     match compression_method {
         CompressionMethod::Stored => Ok(Ok(ZipFileReader::Stored(Crc32Reader::new(
             reader,
             crc32,
-            #[cfg(feature = "aes-crypto")]
             ae2_encrypted,
         )))),
         #[cfg(any(
@@ -191,7 +189,6 @@ fn make_reader<'a>(
             Ok(Ok(ZipFileReader::Deflated(Crc32Reader::new(
                 deflate_reader,
                 crc32,
-                #[cfg(feature = "aes-crypto")]
                 ae2_encrypted,
             ))))
         }
@@ -201,7 +198,6 @@ fn make_reader<'a>(
             Ok(Ok(ZipFileReader::Bzip2(Crc32Reader::new(
                 bzip2_reader,
                 crc32,
-                #[cfg(feature = "aes-crypto")]
                 ae2_encrypted,
             ))))
         }
@@ -555,15 +551,13 @@ fn central_header_to_zip_file<R: Read + io::Seek>(
         aes_mode: None,
     };
 
-    #[cfg(feature = "aes-crypto")]
-    let aes_enabled = result.compression_method == CompressionMethod::AES;
+    let aes_enabled = result.compression_method == CompressionMethod::Aes;
 
     match parse_extra_field(&mut result, &*extra_field) {
         Ok(..) | Err(ZipError::Io(..)) => {}
         Err(e) => return Err(e),
     }
 
-    #[cfg(feature = "aes-crypto")]
     if aes_enabled && result.aes_mode.is_none() {
         return Err(ZipError::InvalidArchive(
             "AES encryption without AES extra data field",
