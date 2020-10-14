@@ -1,3 +1,9 @@
+//! A counter mode (CTR) for AES to work with the encryption used in zip files.
+//!
+//! This was implemented since the zip specification requires the mode to not use a nonce and uses a
+//! different byte order (little endian) than NIST (big endian).
+//! See [AesCtrZipKeyStream](./struct.AesCtrZipKeyStream.html) for more information.
+
 use aes::block_cipher::generic_array::GenericArray;
 use aes::{BlockCipher, NewBlockCipher};
 use byteorder::WriteBytesExt;

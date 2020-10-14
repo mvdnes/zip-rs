@@ -1,3 +1,9 @@
+//! Implementation of the AES decryption for zip files.
+//!
+//! This was implemented according to the [WinZip specification](https://www.winzip.com/win/en/aes_info.html).
+//! Note that using CRC with AES depends on the specific encryption specification used, AE-1 or AE-2.
+//! AE-2 doesn't set the CRC field correctly, even though some zip files still have CRC set even with AE-2.
+
 use crate::aes_ctr;
 
 use constant_time_eq::constant_time_eq;
