@@ -18,6 +18,11 @@ const AUTH_CODE_LENGTH: usize = 10;
 /// The number of iterations used with PBKDF2
 const ITERATION_COUNT: u32 = 1000;
 
+/// Create a AesCipher depending on the used `AesMode` and the given `key`.
+/// 
+/// # Panics
+///
+/// This panics if `key` doesn't have the correct size for the chosen aes mode.
 fn cipher_from_mode(aes_mode: AesMode, key: &[u8]) -> Box<dyn aes_ctr::AesCipher> {
     match aes_mode {
         AesMode::Aes128 => Box::new(aes_ctr::AesCtrZipKeyStream::<aes_ctr::Aes128>::new(key))
@@ -128,6 +133,11 @@ impl<R: Read> AesReader<R> {
     }
 }
 
+/// A reader for aes encrypted files, which has already passed the first password check.
+///
+/// There is a 1 in 65536 chance that an invalid password passes that check.
+/// After the data has been read and decrypted an HMAC will be checked and provide a final means
+/// to check if either the password is invalid or if the data has been changed.
 pub struct AesReaderValid<R: Read> {
     reader: R,
     data_remaining: u64,

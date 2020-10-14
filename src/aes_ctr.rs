@@ -85,6 +85,10 @@ where
     C::Cipher: NewBlockCipher,
 {
     /// Creates a new zip variant AES-CTR key stream.
+    ///
+    /// # Panics
+    ///
+    /// This panics if `key` doesn't have the correct size for cipher `C`.
     pub fn new(key: &[u8]) -> AesCtrZipKeyStream<C> {
         AesCtrZipKeyStream {
             counter: 1,
