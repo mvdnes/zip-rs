@@ -150,6 +150,12 @@ fn xor(dest: &mut [u8], src: &[u8]) {
 mod tests {
     use super::{Aes128, Aes192, Aes256, AesCipher, AesCtrZipKeyStream};
 
+    #[test]
+    #[should_panic]
+    fn new_with_wrong_key_size() {
+        AesCtrZipKeyStream::<Aes128>::new(&[1, 2, 3, 4, 5]);
+    }
+
     // The data used in these tests was generated with p7zip without any compression.
     // It's not possible to recreate the exact same data, since a random salt is used for encryption.
     // `7z a -phelloworld -mem=AES256 -mx=0 aes256_40byte.zip 40byte_data.txt`
