@@ -5,6 +5,7 @@
 //! AE-2 doesn't set the CRC field correctly, even though some zip files still have CRC set even with AE-2.
 
 use crate::aes_ctr;
+use crate::types::AesMode;
 
 use constant_time_eq::constant_time_eq;
 use hmac::{Hmac, Mac, NewMac};
@@ -19,7 +20,7 @@ const AUTH_CODE_LENGTH: usize = 10;
 const ITERATION_COUNT: u32 = 1000;
 
 /// Create a AesCipher depending on the used `AesMode` and the given `key`.
-/// 
+///
 /// # Panics
 ///
 /// This panics if `key` doesn't have the correct size for the chosen aes mode.
@@ -31,37 +32,6 @@ fn cipher_from_mode(aes_mode: AesMode, key: &[u8]) -> Box<dyn aes_ctr::AesCipher
             as Box<dyn aes_ctr::AesCipher>,
         AesMode::Aes256 => Box::new(aes_ctr::AesCtrZipKeyStream::<aes_ctr::Aes256>::new(key))
             as Box<dyn aes_ctr::AesCipher>,
-    }
-}
-
-#[cfg(feature = "aes-crypto")]
-#[derive(Copy, Clone, Debug)]
-pub enum AesVendorVersion {
-    Ae1,
-    Ae2,
-}
-
-#[cfg(feature = "aes-crypto")]
-/// AES variant used.
-#[derive(Copy, Clone, Debug)]
-pub enum AesMode {
-    Aes128,
-    Aes192,
-    Aes256,
-}
-
-#[cfg(feature = "aes-crypto")]
-impl AesMode {
-    pub fn salt_length(&self) -> usize {
-        self.key_length() / 2
-    }
-
-    pub fn key_length(&self) -> usize {
-        match self {
-            Self::Aes128 => 16,
-            Self::Aes192 => 24,
-            Self::Aes256 => 32,
-        }
     }
 }
 

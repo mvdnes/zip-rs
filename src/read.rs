@@ -1,13 +1,13 @@
 //! Types for reading ZIP archives
 
 #[cfg(feature = "aes-crypto")]
-use crate::aes::{AesMode, AesReader, AesReaderValid, AesVendorVersion};
+use crate::aes::{AesReader, AesReaderValid};
 use crate::compression::CompressionMethod;
 use crate::cp437::FromCp437;
 use crate::crc32::Crc32Reader;
 use crate::result::{InvalidPassword, ZipError, ZipResult};
 use crate::spec;
-use crate::types::{DateTime, System, ZipFileData};
+use crate::types::{AesMode, AesVendorVersion, DateTime, System, ZipFileData};
 use crate::zipcrypto::ZipCryptoReader;
 use crate::zipcrypto::ZipCryptoReaderValid;
 use std::borrow::Cow;
@@ -146,13 +146,16 @@ fn make_reader<'a>(
     crc32: u32,
     reader: io::Take<&'a mut dyn io::Read>,
     password: Option<&[u8]>,
-    #[cfg(feature = "aes-crypto")] aes_info: Option<(AesMode, AesVendorVersion)>,
+    aes_info: Option<(AesMode, AesVendorVersion)>,
     #[cfg(feature = "aes-crypto")] compressed_size: u64,
 ) -> ZipResult<Result<ZipFileReader<'a>, InvalidPassword>> {
-    #[cfg(not(feature = "aes-crypto"))]
-    let aes_info: Option<()> = None;
-
     let reader = match (password, aes_info) {
+        #[cfg(not(feature = "aes-crypto"))]
+        (Some(_), Some(_)) => {
+            return Err(ZipError::UnsupportedArchive(
+                "AES encrypted files cannot be decrypted without the aes-crypto feature.",
+            ))
+        }
         #[cfg(feature = "aes-crypto")]
         (Some(password), Some((aes_mode, _))) => {
             match AesReader::new(reader, aes_mode, compressed_size).validate(&password)? {
@@ -160,11 +163,12 @@ fn make_reader<'a>(
                 Some(r) => CryptoReader::Aes(r),
             }
         }
+        (None, Some(_)) => return Ok(Err(InvalidPassword)),
         (Some(password), None) => match ZipCryptoReader::new(reader, password).validate(crc32)? {
             None => return Ok(Err(InvalidPassword)),
             Some(r) => CryptoReader::ZipCrypto(r),
         },
-        _ => CryptoReader::Plaintext(reader),
+        (None, None) => CryptoReader::Plaintext(reader),
     };
 
     #[cfg(feature = "aes-crypto")]
@@ -458,7 +462,6 @@ impl<R: Read + io::Seek> ZipArchive<R> {
             data.crc32,
             limit_reader,
             password,
-            #[cfg(feature = "aes-crypto")]
             data.aes_mode,
             #[cfg(feature = "aes-crypto")]
             data.compressed_size,
@@ -549,7 +552,6 @@ fn central_header_to_zip_file<R: Read + io::Seek>(
         central_header_start,
         data_start: 0,
         external_attributes: external_file_attributes,
-        #[cfg(feature = "aes-crypto")]
         aes_mode: None,
     };
 
@@ -597,7 +599,6 @@ fn parse_extra_field(file: &mut ZipFileData, data: &[u8]) -> ZipResult<()> {
                     len_left -= 8;
                 }
             }
-            #[cfg(feature = "aes-crypto")]
             0x9901 => {
                 // AES
                 if len != 7 {
@@ -860,7 +861,6 @@ pub fn read_zipfile_from_stream<'a, R: io::Read>(
         // We set this to zero, which should be valid as the docs state 'If input came
         // from standard input, this field is set to zero.'
         external_attributes: 0,
-        #[cfg(feature = "aes-crypto")]
         aes_mode: None,
     };
 
@@ -882,6 +882,7 @@ pub fn read_zipfile_from_stream<'a, R: io::Read>(
     let result_compression_method = result.compression_method;
     #[cfg(feature = "aes-crypto")]
     let result_compressed_size = result.compressed_size;
+
     Ok(Some(ZipFile {
         data: Cow::Owned(result),
         reader: make_reader(
@@ -889,7 +890,6 @@ pub fn read_zipfile_from_stream<'a, R: io::Read>(
             result_crc32,
             limit_reader,
             None,
-            #[cfg(feature = "aes-crypto")]
             None,
             #[cfg(feature = "aes-crypto")]
             result_compressed_size,
