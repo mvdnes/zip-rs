@@ -11,6 +11,8 @@ pub use crate::types::DateTime;
 pub use crate::write::ZipWriter;
 
 #[cfg(feature = "aes-crypto")]
+mod aes;
+#[cfg(feature = "aes-crypto")]
 mod aes_ctr;
 mod compression;
 mod cp437;

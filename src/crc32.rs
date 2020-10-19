@@ -10,15 +10,20 @@ pub struct Crc32Reader<R> {
     inner: R,
     hasher: Hasher,
     check: u32,
+    /// Signals if `inner` stores aes encrypted data.
+    /// AE-2 encrypted data doesn't use crc and sets the value to 0.
+    ae2_encrypted: bool,
 }
 
 impl<R> Crc32Reader<R> {
-    /// Get a new Crc32Reader which check the inner reader against checksum.
-    pub fn new(inner: R, checksum: u32) -> Crc32Reader<R> {
+    /// Get a new Crc32Reader which checks the inner reader against checksum.
+    /// The check is disabled if `ae2_encrypted == true`.
+    pub(crate) fn new(inner: R, checksum: u32, ae2_encrypted: bool) -> Crc32Reader<R> {
         Crc32Reader {
             inner,
             hasher: Hasher::new(),
             check: checksum,
+            ae2_encrypted,
         }
     }
 
@@ -33,8 +38,10 @@ impl<R> Crc32Reader<R> {
 
 impl<R: Read> Read for Crc32Reader<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let invalid_check = !buf.is_empty() && !self.check_matches() && !self.ae2_encrypted;
+
         let count = match self.inner.read(buf) {
-            Ok(0) if !buf.is_empty() && !self.check_matches() => {
+            Ok(0) if invalid_check => {
                 return Err(io::Error::new(io::ErrorKind::Other, "Invalid checksum"))
             }
             Ok(n) => n,
@@ -55,10 +62,10 @@ mod test {
         let data: &[u8] = b"";
         let mut buf = [0; 1];
 
-        let mut reader = Crc32Reader::new(data, 0);
+        let mut reader = Crc32Reader::new(data, 0, false);
         assert_eq!(reader.read(&mut buf).unwrap(), 0);
 
-        let mut reader = Crc32Reader::new(data, 1);
+        let mut reader = Crc32Reader::new(data, 1, false);
         assert!(reader
             .read(&mut buf)
             .unwrap_err()
@@ -71,7 +78,7 @@ mod test {
         let data: &[u8] = b"1234";
         let mut buf = [0; 1];
 
-        let mut reader = Crc32Reader::new(data, 0x9be3e0a3);
+        let mut reader = Crc32Reader::new(data, 0x9be3e0a3, false);
         assert_eq!(reader.read(&mut buf).unwrap(), 1);
         assert_eq!(reader.read(&mut buf).unwrap(), 1);
         assert_eq!(reader.read(&mut buf).unwrap(), 1);
@@ -86,7 +93,7 @@ mod test {
         let data: &[u8] = b"1234";
         let mut buf = [0; 5];
 
-        let mut reader = Crc32Reader::new(data, 0x9be3e0a3);
+        let mut reader = Crc32Reader::new(data, 0x9be3e0a3, false);
         assert_eq!(reader.read(&mut buf[..0]).unwrap(), 0);
         assert_eq!(reader.read(&mut buf).unwrap(), 4);
     }

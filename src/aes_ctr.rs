@@ -1,3 +1,9 @@
+//! A counter mode (CTR) for AES to work with the encryption used in zip files.
+//!
+//! This was implemented since the zip specification requires the mode to not use a nonce and uses a
+//! different byte order (little endian) than NIST (big endian).
+//! See [AesCtrZipKeyStream](./struct.AesCtrZipKeyStream.html) for more information.
+
 use aes::block_cipher::generic_array::GenericArray;
 use aes::{BlockCipher, NewBlockCipher};
 use byteorder::WriteBytesExt;
@@ -79,25 +85,29 @@ where
     C::Cipher: NewBlockCipher,
 {
     /// Creates a new zip variant AES-CTR key stream.
-    pub fn new(key: &C::Key) -> AesCtrZipKeyStream<C> {
+    ///
+    /// # Panics
+    ///
+    /// This panics if `key` doesn't have the correct size for cipher `C`.
+    pub fn new(key: &[u8]) -> AesCtrZipKeyStream<C> {
         AesCtrZipKeyStream {
             counter: 1,
-            cipher: C::Cipher::new(GenericArray::from_slice(key.as_ref())),
+            cipher: C::Cipher::new(GenericArray::from_slice(key)),
             buffer: [0u8; AES_BLOCK_SIZE],
             pos: AES_BLOCK_SIZE,
         }
     }
 }
 
-impl<C> AesCtrZipKeyStream<C>
+impl<C> AesCipher for AesCtrZipKeyStream<C>
 where
     C: AesKind,
     C::Cipher: BlockCipher,
 {
     /// Decrypt or encrypt given data.
     #[inline]
-    fn crypt(&mut self, mut target: &mut [u8]) {
-        while target.len() > 0 {
+    fn crypt_in_place(&mut self, mut target: &mut [u8]) {
+        while !target.is_empty() {
             if self.pos == AES_BLOCK_SIZE {
                 // Note: AES block size is always 16 bytes, same as u128.
                 self.buffer
@@ -122,9 +132,14 @@ where
     }
 }
 
+/// This trait allows using generic AES ciphers with different key sizes.
+pub trait AesCipher {
+    fn crypt_in_place(&mut self, target: &mut [u8]);
+}
+
 /// XORs a slice in place with another slice.
 #[inline]
-pub fn xor(dest: &mut [u8], src: &[u8]) {
+fn xor(dest: &mut [u8], src: &[u8]) {
     debug_assert_eq!(dest.len(), src.len());
 
     for (lhs, rhs) in dest.iter_mut().zip(src.iter()) {
@@ -134,7 +149,13 @@ pub fn xor(dest: &mut [u8], src: &[u8]) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Aes128, Aes192, Aes256, AesCtrZipKeyStream};
+    use super::{Aes128, Aes192, Aes256, AesCipher, AesCtrZipKeyStream};
+
+    #[test]
+    #[should_panic]
+    fn new_with_wrong_key_size() {
+        AesCtrZipKeyStream::<Aes128>::new(&[1, 2, 3, 4, 5]);
+    }
 
     // The data used in these tests was generated with p7zip without any compression.
     // It's not possible to recreate the exact same data, since a random salt is used for encryption.
@@ -148,17 +169,16 @@ mod tests {
             0x18, 0x55, 0x24, 0xa3, 0x9e, 0x0e, 0x40, 0xe7, 0x92, 0xad, 0xb2, 0x8a, 0x48, 0xf4,
             0x5c, 0xd0, 0xc0, 0x54,
         ];
-        eprintln!("{}", key.len());
 
         let mut key_stream = AesCtrZipKeyStream::<Aes256>::new(&key);
 
         let mut plaintext = ciphertext;
-        key_stream.crypt(&mut plaintext);
+        key_stream.crypt_in_place(&mut plaintext);
         assert_eq!(plaintext.to_vec(), expected_plaintext.to_vec());
 
         // Round-tripping should yield the ciphertext again.
         let mut key_stream = AesCtrZipKeyStream::<Aes256>::new(&key);
-        key_stream.crypt(&mut plaintext);
+        key_stream.crypt_in_place(&mut plaintext);
         assert_eq!(plaintext.to_vec(), ciphertext.to_vec());
     }
 
@@ -170,17 +190,16 @@ mod tests {
             0xe0, 0x25, 0x7b, 0x57, 0x97, 0x6a, 0xa4, 0x23, 0xab, 0x94, 0xaa, 0x44, 0xfd, 0x47,
             0x4f, 0xa5,
         ];
-        eprintln!("{}", key.len());
 
         let mut key_stream = AesCtrZipKeyStream::<Aes128>::new(&key);
 
         let mut plaintext = ciphertext;
-        key_stream.crypt(&mut plaintext);
+        key_stream.crypt_in_place(&mut plaintext);
         assert_eq!(plaintext.to_vec(), expected_plaintext.to_vec());
 
         // Round-tripping should yield the ciphertext again.
         let mut key_stream = AesCtrZipKeyStream::<Aes128>::new(&key);
-        key_stream.crypt(&mut plaintext);
+        key_stream.crypt_in_place(&mut plaintext);
         assert_eq!(plaintext.to_vec(), ciphertext.to_vec());
     }
 
@@ -192,17 +211,16 @@ mod tests {
             0xe4, 0x4a, 0x88, 0x52, 0x8f, 0xf7, 0x0b, 0x81, 0x7b, 0x75, 0xf1, 0x74, 0x21, 0x37,
             0x8c, 0x90, 0xad, 0xbe, 0x4a, 0x65, 0xa8, 0x96, 0x0e, 0xcc,
         ];
-        eprintln!("{}", key.len());
 
         let mut key_stream = AesCtrZipKeyStream::<Aes192>::new(&key);
 
         let mut plaintext = ciphertext;
-        key_stream.crypt(&mut plaintext);
+        key_stream.crypt_in_place(&mut plaintext);
         assert_eq!(plaintext.to_vec(), expected_plaintext.to_vec());
 
         // Round-tripping should yield the ciphertext again.
         let mut key_stream = AesCtrZipKeyStream::<Aes192>::new(&key);
-        key_stream.crypt(&mut plaintext);
+        key_stream.crypt_in_place(&mut plaintext);
         assert_eq!(plaintext.to_vec(), ciphertext.to_vec());
     }
 
@@ -215,17 +233,16 @@ mod tests {
             0xa5, 0xee, 0x3a, 0x4f, 0x0f, 0x4b, 0x29, 0xbd, 0xe9, 0xb8, 0x41, 0x9c, 0x41, 0xa5,
             0x15, 0xb2, 0x86, 0xab,
         ];
-        eprintln!("{}", key.len());
 
         let mut key_stream = AesCtrZipKeyStream::<Aes256>::new(&key);
 
         let mut plaintext = ciphertext;
-        key_stream.crypt(&mut plaintext);
+        key_stream.crypt_in_place(&mut plaintext);
         assert_eq!(plaintext.to_vec(), expected_plaintext.to_vec());
 
         // Round-tripping should yield the ciphertext again.
         let mut key_stream = AesCtrZipKeyStream::<Aes256>::new(&key);
-        key_stream.crypt(&mut plaintext);
+        key_stream.crypt_in_place(&mut plaintext);
         assert_eq!(plaintext.to_vec(), ciphertext.to_vec());
     }
 
@@ -241,17 +258,16 @@ mod tests {
             0x43, 0x2b, 0x6d, 0xbe, 0x05, 0x76, 0x6c, 0x9e, 0xde, 0xca, 0x3b, 0xf8, 0xaf, 0x5d,
             0x81, 0xb6,
         ];
-        eprintln!("{}", key.len());
 
         let mut key_stream = AesCtrZipKeyStream::<Aes128>::new(&key);
 
         let mut plaintext = ciphertext;
-        key_stream.crypt(&mut plaintext);
+        key_stream.crypt_in_place(&mut plaintext);
         assert_eq!(plaintext.to_vec(), expected_plaintext.to_vec());
 
         // Round-tripping should yield the ciphertext again.
         let mut key_stream = AesCtrZipKeyStream::<Aes128>::new(&key);
-        key_stream.crypt(&mut plaintext);
+        key_stream.crypt_in_place(&mut plaintext);
         assert_eq!(plaintext.to_vec(), ciphertext.to_vec());
     }
 
@@ -267,17 +283,16 @@ mod tests {
             0xac, 0x92, 0x41, 0xba, 0xde, 0xd9, 0x02, 0xfe, 0x40, 0x92, 0x20, 0xf6, 0x56, 0x03,
             0xfe, 0xae, 0x1b, 0xba, 0x01, 0x97, 0x97, 0x79, 0xbb, 0xa6,
         ];
-        eprintln!("{}", key.len());
 
         let mut key_stream = AesCtrZipKeyStream::<Aes192>::new(&key);
 
         let mut plaintext = ciphertext;
-        key_stream.crypt(&mut plaintext);
+        key_stream.crypt_in_place(&mut plaintext);
         assert_eq!(plaintext.to_vec(), expected_plaintext.to_vec());
 
         // Round-tripping should yield the ciphertext again.
         let mut key_stream = AesCtrZipKeyStream::<Aes192>::new(&key);
-        key_stream.crypt(&mut plaintext);
+        key_stream.crypt_in_place(&mut plaintext);
         assert_eq!(plaintext.to_vec(), ciphertext.to_vec());
     }
 
@@ -294,17 +309,16 @@ mod tests {
             0xe1, 0x4d, 0x4a, 0x77, 0xd4, 0xeb, 0x9e, 0x3d, 0x75, 0xce, 0x9a, 0x3e, 0x10, 0x50,
             0xc2, 0x07, 0x36, 0xb6,
         ];
-        eprintln!("{}", key.len());
 
         let mut key_stream = AesCtrZipKeyStream::<Aes256>::new(&key);
 
         let mut plaintext = ciphertext;
-        key_stream.crypt(&mut plaintext);
+        key_stream.crypt_in_place(&mut plaintext);
         assert_eq!(plaintext.to_vec(), expected_plaintext.to_vec());
 
         // Round-tripping should yield the ciphertext again.
         let mut key_stream = AesCtrZipKeyStream::<Aes256>::new(&key);
-        key_stream.crypt(&mut plaintext);
+        key_stream.crypt_in_place(&mut plaintext);
         assert_eq!(plaintext.to_vec(), ciphertext.to_vec());
     }
 }

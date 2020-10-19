@@ -3,7 +3,7 @@ use bencher::{benchmark_group, benchmark_main};
 use std::io::{Cursor, Read, Write};
 
 use bencher::Bencher;
-use rand::Rng;
+use rand::RngCore;
 use zip::{ZipArchive, ZipWriter};
 
 fn generate_random_archive(size: usize) -> Vec<u8> {

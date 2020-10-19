@@ -238,6 +238,7 @@ impl<W: Write + io::Seek> ZipWriter<W> {
                 data_start: 0,
                 central_header_start: 0,
                 external_attributes: permissions << 16,
+                aes_mode: None,
             };
             write_local_file_header(writer, &file)?;
 
@@ -448,6 +449,11 @@ impl<W: Write + io::Seek> GenericZipWriter<W> {
                 #[cfg(feature = "bzip2")]
                 CompressionMethod::Bzip2 => {
                     GenericZipWriter::Bzip2(BzEncoder::new(bare, bzip2::Compression::Default))
+                }
+                CompressionMethod::Aes => {
+                    return Err(ZipError::UnsupportedArchive(
+                        "AES compression is not supported for writing",
+                    ))
                 }
                 CompressionMethod::Unsupported(..) => {
                     return Err(ZipError::UnsupportedArchive("Unsupported compression"))
