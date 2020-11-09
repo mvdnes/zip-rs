@@ -52,7 +52,7 @@ All of these are enabled by default.
 MSRV
 ----
 
-Our current Minimum Supported Rust Version is **1.34.0**. When adding features,
+Our current Minimum Supported Rust Version is **1.42.0**. When adding features,
 we will follow these guidelines:
 
 - We will always support the latest four minor Rust versions. This gives you a 6
