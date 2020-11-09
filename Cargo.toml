@@ -35,7 +35,7 @@ aes-crypto = [ "aes", "constant_time_eq", "hmac", "pbkdf2", "sha-1" ]
 deflate = ["flate2/rust_backend"]
 deflate-miniz = ["flate2/default"]
 deflate-zlib = ["flate2/zlib"]
-default = ["bzip2", "deflate", "time"]
+default = ["aes-crypto", "bzip2", "deflate", "time"]
 
 [[bench]]
 name = "read_entry"
