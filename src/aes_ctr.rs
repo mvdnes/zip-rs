@@ -4,7 +4,7 @@
 //! different byte order (little endian) than NIST (big endian).
 //! See [AesCtrZipKeyStream](./struct.AesCtrZipKeyStream.html) for more information.
 
-use aes::block_cipher::generic_array::GenericArray;
+use aes::cipher::generic_array::GenericArray;
 use aes::{BlockCipher, NewBlockCipher};
 use byteorder::WriteBytesExt;
 use std::{any, fmt};
