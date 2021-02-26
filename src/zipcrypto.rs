@@ -5,6 +5,11 @@
 
 use std::num::Wrapping;
 
+#[cfg(feature = "async")]
+use futures::io::{AsyncRead, AsyncReadExt};
+#[cfg(feature = "async")]
+use pin_project::pin_project;
+
 /// A container to hold the current key state
 struct ZipCryptoKeys {
     key_0: Wrapping<u32>,
@@ -52,7 +57,9 @@ impl ZipCryptoKeys {
 }
 
 /// A ZipCrypto reader with unverified password
+#[cfg_attr(feature = "async", pin_project(project=ZipCryptoReaderProject))]
 pub struct ZipCryptoReader<R> {
+    #[cfg_attr(feature = "async", pin)]
     file: R,
     keys: ZipCryptoKeys,
 }
@@ -66,7 +73,7 @@ impl<R: std::io::Read> ZipCryptoReader<R> {
     /// password byte sequence that is unrepresentable in UTF-8.
     pub fn new(file: R, password: &[u8]) -> ZipCryptoReader<R> {
         let mut result = ZipCryptoReader {
-            file: file,
+            file,
             keys: ZipCryptoKeys::new(),
         };
 
@@ -101,8 +108,56 @@ impl<R: std::io::Read> ZipCryptoReader<R> {
     }
 }
 
+// TODO: Not sure if we can remove the unpin bound here
+#[cfg(feature = "async")]
+impl<R: AsyncRead + Unpin> ZipCryptoReader<R> {
+    /// Note: The password is `&[u8]` and not `&str` because the
+    /// [zip specification](https://pkware.cachefly.net/webdocs/APPNOTE/APPNOTE-6.3.3.TXT)
+    /// does not specify password encoding (see function `update_keys` in the specification).
+    /// Therefore, if `&str` was used, the password would be UTF-8 and it
+    /// would be impossible to decrypt files that were encrypted with a
+    /// password byte sequence that is unrepresentable in UTF-8.
+    pub async fn new_async(file: R, password: &[u8]) -> ZipCryptoReader<R> {
+        let mut result = ZipCryptoReader {
+            file,
+            keys: ZipCryptoKeys::new(),
+        };
+
+        // Key the cipher by updating the keys with the password.
+        for byte in password.iter() {
+            result.keys.update(*byte);
+        }
+
+        result
+    }
+
+    /// Read the ZipCrypto header bytes and validate the password.
+    pub async fn validate_async(
+        mut self,
+        crc32_plaintext: u32,
+    ) -> Result<Option<ZipCryptoReaderValid<R>>, std::io::Error> {
+        // ZipCrypto prefixes a file with a 12 byte header
+        let mut header_buf = [0u8; 12];
+        self.file.read_exact(&mut header_buf).await?;
+        for byte in header_buf.iter_mut() {
+            *byte = self.keys.decrypt_byte(*byte);
+        }
+
+        // PKZIP before 2.0 used 2 byte CRC check.
+        // PKZIP 2.0+ used 1 byte CRC check. It's more secure.
+        // We also use 1 byte CRC.
+
+        if (crc32_plaintext >> 24) as u8 != header_buf[11] {
+            return Ok(None); // Wrong password
+        }
+        Ok(Some(ZipCryptoReaderValid { reader: self }))
+    }
+}
+
 /// A ZipCrypto reader with verified password
+#[cfg_attr(feature = "async", pin_project(project=ZipCryptoReaderValidProject))]
 pub struct ZipCryptoReaderValid<R> {
+    #[cfg_attr(feature = "async", pin)]
     reader: ZipCryptoReader<R>,
 }
 
@@ -119,7 +174,28 @@ impl<R: std::io::Read> std::io::Read for ZipCryptoReaderValid<R> {
     }
 }
 
-impl<R: std::io::Read> ZipCryptoReaderValid<R> {
+#[cfg(feature = "async")]
+impl<R: AsyncRead> AsyncRead for ZipCryptoReaderValid<R> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut [u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        // Note: There might be potential for optimization. Inspiration can be found at:
+        // https://github.com/kornelski/7z/blob/master/CPP/7zip/Crypto/ZipCrypto.cpp
+        let ZipCryptoReaderValidProject { reader } = self.as_mut().project();
+        let ZipCryptoReaderProject { file, keys } = reader.project();
+        file.poll_read(cx, buf).map(|result| {
+            for byte in buf.iter_mut() {
+                *byte = keys.decrypt_byte(*byte);
+            }
+
+            result
+        })
+    }
+}
+
+impl<R> ZipCryptoReaderValid<R> {
     /// Consumes this decoder, returning the underlying reader.
     pub fn into_inner(self) -> R {
         self.reader.file

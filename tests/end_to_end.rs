@@ -2,6 +2,12 @@ use std::collections::HashSet;
 use std::io::prelude::*;
 use std::io::{Cursor, Seek};
 use std::iter::FromIterator;
+
+#[cfg(feature = "async")]
+use futures::AsyncReadExt;
+#[cfg(feature = "async")]
+use futures_await_test::async_test;
+
 use zip::write::FileOptions;
 use zip::CompressionMethod;
 
@@ -44,6 +50,22 @@ fn copy() {
 
     check_zip_file_contents(&mut tgt_archive, ENTRY_NAME);
     check_zip_file_contents(&mut tgt_archive, COPY_ENTRY_NAME);
+}
+
+#[cfg(feature = "async")]
+#[async_test]
+async fn async_end_to_end() {
+    let mut file = Cursor::new(Vec::new());
+
+    write_to_zip(&mut file).expect("file written");
+
+    let position = file.position();
+    let mut file = futures::io::Cursor::new(file.into_inner());
+    file.set_position(position);
+
+    let file_contents: String = read_zip_file_async(&mut file).await.unwrap();
+
+    assert!(file_contents.as_bytes() == LOREM_IPSUM);
 }
 
 fn write_to_zip(file: &mut Cursor<Vec<u8>>) -> zip::result::ZipResult<()> {
@@ -94,6 +116,24 @@ fn check_zip_contents(zip_file: &mut Cursor<Vec<u8>>, name: &str) {
 fn check_zip_file_contents<R: Read + Seek>(archive: &mut zip::ZipArchive<R>, name: &str) {
     let file_contents: String = read_zip_file(archive, name).unwrap();
     assert!(file_contents.as_bytes() == LOREM_IPSUM);
+}
+
+#[cfg(feature = "async")]
+async fn read_zip_file_async(
+    zip_file: &mut futures::io::Cursor<Vec<u8>>,
+) -> zip::result::ZipResult<String> {
+    let mut archive = zip::AsyncZipArchive::new(zip_file).await.unwrap();
+
+    let expected_file_names = ["test/", "test/☃.txt", "test/lorem_ipsum.txt"];
+    let expected_file_names = HashSet::from_iter(expected_file_names.iter().map(|&v| v));
+    let file_names = archive.file_names().collect::<HashSet<_>>();
+    assert_eq!(file_names, expected_file_names);
+
+    let mut file = archive.by_name("test/lorem_ipsum.txt").await?;
+
+    let mut contents = String::new();
+    file.read_to_string(&mut contents).await.unwrap();
+    Ok(contents)
 }
 
 const LOREM_IPSUM : &'static [u8] = b"Lorem ipsum dolor sit amet, consectetur adipiscing elit. In tellus elit, tristique vitae mattis egestas, ultricies vitae risus. Quisque sit amet quam ut urna aliquet

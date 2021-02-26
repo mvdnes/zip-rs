@@ -22,6 +22,28 @@ use flate2::write::DeflateEncoder;
 #[cfg(feature = "bzip2")]
 use bzip2::write::BzEncoder;
 
+#[cfg(feature = "async")]
+use crate::async_util::Compat;
+#[cfg(feature = "async")]
+use crate::read::AsyncZipFile;
+#[cfg(feature = "async")]
+use async_compression::futures::write::{
+    BzEncoder as AsyncBzEncoder, DeflateEncoder as AsyncDeflateEncoder,
+};
+#[cfg(feature = "async")]
+use futures::{
+    io::{AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt},
+    task::Poll,
+};
+#[cfg(feature = "async")]
+use pin_project::{pin_project, pinned_drop};
+#[cfg(feature = "async")]
+use std::pin::Pin;
+#[cfg(feature = "async")]
+use std::task::Context;
+#[cfg(feature = "async")]
+use tokio::io::AsyncWriteExt as TokioAsyncWriteExt;
+
 enum GenericZipWriter<W: Write + io::Seek> {
     Closed,
     Storer(W),
@@ -33,6 +55,21 @@ enum GenericZipWriter<W: Write + io::Seek> {
     Deflater(DeflateEncoder<W>),
     #[cfg(feature = "bzip2")]
     Bzip2(BzEncoder<W>),
+}
+
+#[cfg(feature = "async")]
+#[pin_project]
+enum AsyncGenericZipWriter<W: AsyncWrite + AsyncSeek> {
+    Closed,
+    Storer(#[pin] W),
+    #[cfg(any(
+        feature = "deflate",
+        feature = "deflate-miniz",
+        feature = "deflate-zlib"
+    ))]
+    Deflater(#[pin] AsyncDeflateEncoder<W>),
+    #[cfg(feature = "bzip2")]
+    Bzip2(#[pin] AsyncBzEncoder<W>),
 }
 
 /// ZIP archive generator
@@ -65,6 +102,25 @@ enum GenericZipWriter<W: Write + io::Seek> {
 /// ```
 pub struct ZipWriter<W: Write + io::Seek> {
     inner: GenericZipWriter<W>,
+    files: Vec<ZipFileData>,
+    stats: ZipWriterStats,
+    writing_to_file: bool,
+    comment: String,
+    writing_raw: bool,
+}
+
+/// Async ZIP archive generator
+///
+/// Handles the bookkeeping involved in building an archive, and provides an
+/// API to edit its contents.
+///
+/// Unlike `ZipWriter` you **MUST** call `.finish()` before dropping the writer, otherwise the file may not be finished.
+#[cfg(feature = "async")]
+#[pin_project(project=AsyncZipWriterProject, PinnedDrop)]
+#[must_use = "You must call .finish() before dropping AsyncZipWriter."]
+pub struct AsyncZipWriter<W: AsyncWrite + AsyncSeek + Unpin> {
+    #[pin]
+    inner: AsyncGenericZipWriter<W>,
     files: Vec<ZipFileData>,
     stats: ZipWriterStats,
     writing_to_file: bool,
@@ -183,6 +239,61 @@ impl<W: Write + io::Seek> Write for ZipWriter<W> {
                 io::ErrorKind::BrokenPipe,
                 "ZipWriter was already closed",
             )),
+        }
+    }
+}
+
+#[cfg(feature = "async")]
+impl<W: AsyncWrite + AsyncSeek + Unpin> AsyncWrite for AsyncZipWriter<W> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, futures::io::Error>> {
+        if !self.writing_to_file {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::Other,
+                "No file has been started",
+            )));
+        }
+        let AsyncZipWriterProject {
+            mut inner, stats, ..
+        } = self.project();
+        match inner.ref_mut() {
+            Some(w) => {
+                let write_result = w.poll_write(cx, buf);
+                if let Poll::Ready(Ok(count)) = write_result {
+                    stats.update(&buf[0..count]);
+                }
+                write_result
+            }
+            None => Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "ZipWriter was already closed",
+            ))),
+        }
+    }
+
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), futures::io::Error>> {
+        match self.as_mut().inner.ref_mut() {
+            Some(w) => w.poll_flush(cx),
+            None => Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "ZipWriter was already closed",
+            ))),
+        }
+    }
+
+    fn poll_close(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), futures::io::Error>> {
+        match self.as_mut().inner.ref_mut() {
+            Some(w) => w.poll_close(cx),
+            None => Poll::Ready(Ok(())),
         }
     }
 }
@@ -495,6 +606,316 @@ impl<W: Write + io::Seek> ZipWriter<W> {
     }
 }
 
+#[cfg(feature = "async")]
+impl<W: AsyncWrite + AsyncSeek + Unpin> AsyncZipWriter<Pin<Box<W>>> {
+    /// Initializes the archive.
+    ///
+    /// Before writing to this object, the [`ZipWriter::start_file`] function should be called.
+    pub fn new(inner: W) -> Self {
+        Self {
+            inner: AsyncGenericZipWriter::Storer(Box::pin(inner)),
+            files: Vec::new(),
+            stats: Default::default(),
+            writing_to_file: false,
+            comment: String::new(),
+            writing_raw: false,
+        }
+    }
+
+    /// Set ZIP archive comment.
+    pub fn set_comment<S>(&mut self, comment: S)
+    where
+        S: Into<String>,
+    {
+        self.comment = comment.into();
+    }
+
+    /// Start a new file for with the requested options.
+    async fn start_entry<S>(
+        &mut self,
+        name: S,
+        options: FileOptions,
+        raw_values: Option<ZipRawValues>,
+    ) -> ZipResult<()>
+    where
+        S: Into<String>,
+    {
+        self.finish_file().await?;
+
+        let is_raw = raw_values.is_some();
+        let raw_values = raw_values.unwrap_or_else(|| ZipRawValues {
+            crc32: 0,
+            compressed_size: 0,
+            uncompressed_size: 0,
+        });
+
+        {
+            let writer = self.inner.get_plain();
+            let header_start = writer.seek(io::SeekFrom::Current(0)).await?;
+
+            let permissions = options.permissions.unwrap_or(0o100644);
+            let mut file = ZipFileData {
+                system: System::Unix,
+                version_made_by: DEFAULT_VERSION,
+                encrypted: false,
+                compression_method: options.compression_method,
+                last_modified_time: options.last_modified_time,
+                crc32: raw_values.crc32,
+                compressed_size: raw_values.compressed_size,
+                uncompressed_size: raw_values.uncompressed_size,
+                file_name: name.into(),
+                file_name_raw: Vec::new(), // Never used for saving
+                file_comment: String::new(),
+                header_start,
+                data_start: 0,
+                central_header_start: 0,
+                external_attributes: permissions << 16,
+            };
+            write_local_file_header_async(writer, &file).await?;
+
+            let header_end = writer.seek(io::SeekFrom::Current(0)).await?;
+            self.stats.start = header_end;
+            file.data_start = header_end;
+
+            self.stats.bytes_written = 0;
+            self.stats.hasher = Hasher::new();
+
+            self.files.push(file);
+        }
+
+        self.writing_raw = is_raw;
+        self.inner
+            .switch_to(if is_raw {
+                CompressionMethod::Stored
+            } else {
+                options.compression_method
+            })
+            .await?;
+
+        Ok(())
+    }
+
+    async fn finish_file(&mut self) -> ZipResult<()> {
+        self.inner.switch_to(CompressionMethod::Stored).await?;
+        let writer = self.inner.get_plain();
+
+        if !self.writing_raw {
+            let file = match self.files.last_mut() {
+                None => return Ok(()),
+                Some(f) => f,
+            };
+            file.crc32 = self.stats.hasher.clone().finalize();
+            file.uncompressed_size = self.stats.bytes_written;
+
+            let file_end = writer.seek(io::SeekFrom::Current(0)).await?;
+            file.compressed_size = file_end - self.stats.start;
+
+            update_local_file_header_async(writer, file).await?;
+            writer.seek(io::SeekFrom::Start(file_end)).await?;
+        }
+
+        self.writing_to_file = false;
+        self.writing_raw = false;
+        Ok(())
+    }
+
+    /// Create a file in the archive and start writing its' contents.
+    ///
+    /// The data should be written using the [`io::Write`] implementation on this [`ZipWriter`]
+    pub async fn start_file<S>(&mut self, name: S, mut options: FileOptions) -> ZipResult<()>
+    where
+        S: Into<String>,
+    {
+        if options.permissions.is_none() {
+            options.permissions = Some(0o644);
+        }
+        *options.permissions.as_mut().unwrap() |= 0o100000;
+        self.start_entry(name, options, None).await?;
+        self.writing_to_file = true;
+        Ok(())
+    }
+
+    /// Starts a file, taking a Path as argument.
+    ///
+    /// This function ensures that the '/' path seperator is used. It also ignores all non 'Normal'
+    /// Components, such as a starting '/' or '..' and '.'.
+    #[deprecated(
+        since = "0.5.7",
+        note = "by stripping `..`s from the path, the meaning of paths can change. Use `start_file` instead."
+    )]
+    pub async fn start_file_from_path(
+        &mut self,
+        path: &std::path::Path,
+        options: FileOptions,
+    ) -> ZipResult<()> {
+        self.start_file(path_to_string(path), options).await
+    }
+
+    /// Add a new file using the already compressed data from a ZIP file being read and renames it, this
+    /// allows faster copies of the `ZipFile` since there is no need to decompress and compress it again.
+    /// Any `ZipFile` metadata is copied and not checked, for example the file CRC.
+
+    /// ```no_run
+    /// use std::fs::File;
+    /// use std::io::{Read, Seek, Write};
+    /// use zip::{ZipArchive, ZipWriter};
+    ///
+    /// fn copy_rename<R, W>(
+    ///     src: &mut ZipArchive<R>,
+    ///     dst: &mut ZipWriter<W>,
+    /// ) -> zip::result::ZipResult<()>
+    /// where
+    ///     R: Read + Seek,
+    ///     W: Write + Seek,
+    /// {
+    ///     // Retrieve file entry by name
+    ///     let file = src.by_name("src_file.txt")?;
+    ///
+    ///     // Copy and rename the previously obtained file entry to the destination zip archive
+    ///     dst.raw_copy_file_rename(file, "new_name.txt")?;
+    ///
+    ///     Ok(())
+    /// }
+    /// ```
+    pub async fn raw_copy_file_rename<'f, S>(
+        &mut self,
+        mut file: AsyncZipFile<'f>,
+        name: S,
+    ) -> ZipResult<()>
+    where
+        S: Into<String>,
+    {
+        let options = FileOptions::default()
+            .last_modified_time(file.last_modified())
+            .compression_method(file.compression());
+        if let Some(perms) = file.unix_mode() {
+            options.unix_permissions(perms);
+        }
+
+        let raw_values = ZipRawValues {
+            crc32: file.crc32(),
+            compressed_size: file.compressed_size(),
+            uncompressed_size: file.size(),
+        };
+
+        self.start_entry(name, options, Some(raw_values)).await?;
+        self.writing_to_file = true;
+
+        futures::io::copy(file.get_raw_reader(), self).await?;
+
+        Ok(())
+    }
+
+    /// Add a new file using the already compressed data from a ZIP file being read, this allows faster
+    /// copies of the `ZipFile` since there is no need to decompress and compress it again. Any `ZipFile`
+    /// metadata is copied and not checked, for example the file CRC.
+    ///
+    /// ```no_run
+    /// use std::fs::File;
+    /// use std::io::{Read, Seek, Write};
+    /// use zip::{ZipArchive, ZipWriter};
+    ///
+    /// fn copy<R, W>(src: &mut ZipArchive<R>, dst: &mut ZipWriter<W>) -> zip::result::ZipResult<()>
+    /// where
+    ///     R: Read + Seek,
+    ///     W: Write + Seek,
+    /// {
+    ///     // Retrieve file entry by name
+    ///     let file = src.by_name("src_file.txt")?;
+    ///
+    ///     // Copy the previously obtained file entry to the destination zip archive
+    ///     dst.raw_copy_file(file)?;
+    ///
+    ///     Ok(())
+    /// }
+    /// ```
+    pub async fn raw_copy_file<'f>(&mut self, file: AsyncZipFile<'f>) -> ZipResult<()> {
+        let name = file.name().to_owned();
+        self.raw_copy_file_rename(file, name).await
+    }
+
+    /// Add a directory entry.
+    ///
+    /// You can't write data to the file afterwards.
+    pub async fn add_directory<S>(&mut self, name: S, mut options: FileOptions) -> ZipResult<()>
+    where
+        S: Into<String>,
+    {
+        if options.permissions.is_none() {
+            options.permissions = Some(0o755);
+        }
+        *options.permissions.as_mut().unwrap() |= 0o40000;
+        options.compression_method = CompressionMethod::Stored;
+
+        let name_as_string = name.into();
+        // Append a slash to the filename if it does not end with it.
+        let name_with_slash = match name_as_string.chars().last() {
+            Some('/') | Some('\\') => name_as_string,
+            _ => name_as_string + "/",
+        };
+
+        self.start_entry(name_with_slash, options, None).await?;
+        self.writing_to_file = false;
+        Ok(())
+    }
+
+    /// Add a directory entry, taking a Path as argument.
+    ///
+    /// This function ensures that the '/' path seperator is used. It also ignores all non 'Normal'
+    /// Components, such as a starting '/' or '..' and '.'.
+    #[deprecated(
+        since = "0.5.7",
+        note = "by stripping `..`s from the path, the meaning of paths can change. Use `add_directory` instead."
+    )]
+    pub async fn add_directory_from_path(
+        &mut self,
+        path: &std::path::Path,
+        options: FileOptions,
+    ) -> ZipResult<()> {
+        self.add_directory(path_to_string(path), options).await
+    }
+
+    /// Finish the last file and write all other zip-structures
+    ///
+    /// This will return the writer, but one should normally not append any data to the end of the file.
+    ///
+    /// This **MUST** be called before dropping. `AsyncZipWriter` is annotated with `must_use` to try to prevent misuse.
+    /// When compiled with debug assertions forgetting to drop `AsyncZipWriter` will panic.
+    pub async fn finish(mut self) -> ZipResult<Pin<Box<W>>> {
+        self.finalize().await?;
+        let inner = mem::replace(&mut self.inner, AsyncGenericZipWriter::Closed);
+        Ok(inner.unwrap())
+    }
+
+    async fn finalize(&mut self) -> ZipResult<()> {
+        self.finish_file().await?;
+
+        {
+            let writer = self.inner.get_plain();
+
+            let central_start = writer.seek(io::SeekFrom::Current(0)).await?;
+            for file in self.files.iter() {
+                write_central_directory_header_async(writer, file).await?;
+            }
+            let central_size = writer.seek(io::SeekFrom::Current(0)).await? - central_start;
+
+            let footer = spec::CentralDirectoryEnd {
+                disk_number: 0,
+                disk_with_central_directory: 0,
+                number_of_files_on_this_disk: self.files.len() as u16,
+                number_of_files: self.files.len() as u16,
+                central_directory_size: central_size as u32,
+                central_directory_offset: central_start as u32,
+                zip_file_comment: self.comment.as_bytes().to_vec(),
+            };
+
+            footer.write_async(writer).await?;
+        }
+
+        Ok(())
+    }
+}
+
 impl<W: Write + io::Seek> Drop for ZipWriter<W> {
     fn drop(&mut self) {
         if !self.inner.is_closed() {
@@ -502,6 +923,14 @@ impl<W: Write + io::Seek> Drop for ZipWriter<W> {
                 let _ = write!(&mut io::stderr(), "ZipWriter drop failed: {:?}", e);
             }
         }
+    }
+}
+
+#[cfg(feature = "async")]
+#[pinned_drop]
+impl<W: AsyncWrite + AsyncSeek + Unpin> PinnedDrop for AsyncZipWriter<W> {
+    fn drop(self: Pin<&mut Self>) {
+        debug_assert!(self.project().inner.is_closed(), "AsyncZipWriter was dropped without being closed. You must call .finish() before it is dropped.");
     }
 }
 
@@ -616,6 +1045,119 @@ impl<W: Write + io::Seek> GenericZipWriter<W> {
     }
 }
 
+#[cfg(feature = "async")]
+impl<W: AsyncWrite + AsyncSeek + Unpin> AsyncGenericZipWriter<W> {
+    async fn switch_to(&mut self, compression: CompressionMethod) -> ZipResult<()> {
+        match self.current_compression() {
+            Some(method) if method == compression => return Ok(()),
+            None => {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "ZipWriter was already closed",
+                )
+                .into())
+            }
+            _ => {}
+        }
+
+        let bare = match mem::replace(self, Self::Closed) {
+            Self::Storer(w) => w,
+            #[cfg(any(
+                feature = "deflate",
+                feature = "deflate-miniz",
+                feature = "deflate-zlib"
+            ))]
+            Self::Deflater(mut w) => {
+                w.flush().await?;
+                w.into_inner()
+            }
+            #[cfg(feature = "bzip2")]
+            Self::Bzip2(mut w) => {
+                w.flush().await?;
+                w.into_inner()
+            }
+            Self::Closed => {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "ZipWriter was already closed",
+                )
+                .into())
+            }
+        };
+
+        *self = {
+            #[allow(deprecated)]
+            match compression {
+                CompressionMethod::Stored => Self::Storer(bare),
+                #[cfg(any(
+                    feature = "deflate",
+                    feature = "deflate-miniz",
+                    feature = "deflate-zlib"
+                ))]
+                CompressionMethod::Deflated => Self::Deflater(AsyncDeflateEncoder::new(bare)),
+                #[cfg(feature = "bzip2")]
+                CompressionMethod::Bzip2 => Self::Bzip2(AsyncBzEncoder::new(bare)),
+                CompressionMethod::Unsupported(..) => {
+                    return Err(ZipError::UnsupportedArchive("Unsupported compression"))
+                }
+            }
+        };
+
+        Ok(())
+    }
+
+    fn ref_mut(&mut self) -> Option<Pin<&mut dyn AsyncWrite>> {
+        match *self {
+            Self::Storer(ref mut w) => Some(Pin::new(w) as Pin<&mut dyn AsyncWrite>),
+            #[cfg(any(
+                feature = "deflate",
+                feature = "deflate-miniz",
+                feature = "deflate-zlib"
+            ))]
+            Self::Deflater(ref mut w) => Some(Pin::new(w) as Pin<&mut dyn AsyncWrite>),
+            #[cfg(feature = "bzip2")]
+            Self::Bzip2(ref mut w) => Some(Pin::new(w) as Pin<&mut dyn AsyncWrite>),
+            Self::Closed => None,
+        }
+    }
+
+    fn is_closed(&self) -> bool {
+        match *self {
+            Self::Closed => true,
+            _ => false,
+        }
+    }
+
+    fn get_plain(&mut self) -> &mut W {
+        match *self {
+            Self::Storer(ref mut w) => w,
+            _ => panic!("Should have switched to stored beforehand"),
+        }
+    }
+
+    fn current_compression(&self) -> Option<CompressionMethod> {
+        match *self {
+            Self::Storer(..) => Some(CompressionMethod::Stored),
+            #[cfg(any(
+                feature = "deflate",
+                feature = "deflate-miniz",
+                feature = "deflate-zlib"
+            ))]
+            Self::Deflater(..) => Some(CompressionMethod::Deflated),
+            #[cfg(feature = "bzip2")]
+            Self::Bzip2(..) => Some(CompressionMethod::Bzip2),
+            Self::Closed => None,
+        }
+    }
+
+    fn unwrap(self) -> W {
+        match self {
+            Self::Storer(w) => w,
+            _ => panic!("Should have switched to stored beforehand"),
+        }
+    }
+}
+
 fn write_local_file_header<T: Write>(writer: &mut T, file: &ZipFileData) -> ZipResult<()> {
     // local file header signature
     writer.write_u32::<LittleEndian>(spec::LOCAL_FILE_HEADER_SIGNATURE)?;
@@ -653,6 +1195,58 @@ fn write_local_file_header<T: Write>(writer: &mut T, file: &ZipFileData) -> ZipR
     Ok(())
 }
 
+#[cfg(feature = "async")]
+async fn write_local_file_header_async<T: AsyncWrite + Unpin>(
+    writer: &mut T,
+    file: &ZipFileData,
+) -> ZipResult<()> {
+    let mut writer = Compat(writer);
+    // local file header signature
+    writer
+        .write_u32_le(spec::LOCAL_FILE_HEADER_SIGNATURE)
+        .await?;
+    // version needed to extract
+    writer.write_u16_le(file.version_needed()).await?;
+    // general purpose bit flag
+    let flag = if !file.file_name.is_ascii() {
+        1u16 << 11
+    } else {
+        0
+    };
+    writer.write_u16_le(flag).await?;
+    // Compression method
+    #[allow(deprecated)]
+    writer
+        .write_u16_le(file.compression_method.to_u16())
+        .await?;
+    // last mod file time and last mod file date
+    writer
+        .write_u16_le(file.last_modified_time.timepart())
+        .await?;
+    writer
+        .write_u16_le(file.last_modified_time.datepart())
+        .await?;
+    // crc-32
+    writer.write_u32_le(file.crc32).await?;
+    // compressed size
+    writer.write_u32_le(file.compressed_size as u32).await?;
+    // uncompressed size
+    writer.write_u32_le(file.uncompressed_size as u32).await?;
+    // file name length
+    writer
+        .write_u16_le(file.file_name.as_bytes().len() as u16)
+        .await?;
+    // extra field length
+    let extra_field = build_extra_field(file)?;
+    writer.write_u16_le(extra_field.len() as u16).await?;
+    // file name
+    writer.write_all(file.file_name.as_bytes()).await?;
+    // extra field
+    writer.write_all(&extra_field).await?;
+
+    Ok(())
+}
+
 fn update_local_file_header<T: Write + io::Seek>(
     writer: &mut T,
     file: &ZipFileData,
@@ -662,6 +1256,23 @@ fn update_local_file_header<T: Write + io::Seek>(
     writer.write_u32::<LittleEndian>(file.crc32)?;
     writer.write_u32::<LittleEndian>(file.compressed_size as u32)?;
     writer.write_u32::<LittleEndian>(file.uncompressed_size as u32)?;
+    Ok(())
+}
+
+#[cfg(feature = "async")]
+async fn update_local_file_header_async<T: AsyncWrite + AsyncSeek + Unpin>(
+    writer: &mut T,
+    file: &ZipFileData,
+) -> ZipResult<()> {
+    let mut writer = Compat(writer);
+    const CRC32_OFFSET: u64 = 14;
+    writer
+        .0
+        .seek(io::SeekFrom::Start(file.header_start + CRC32_OFFSET))
+        .await?;
+    writer.write_u32_le(file.crc32).await?;
+    writer.write_u32_le(file.compressed_size as u32).await?;
+    writer.write_u32_le(file.uncompressed_size as u32).await?;
     Ok(())
 }
 
@@ -711,6 +1322,73 @@ fn write_central_directory_header<T: Write>(writer: &mut T, file: &ZipFileData) 
     writer.write_all(file.file_name.as_bytes())?;
     // extra field
     writer.write_all(&extra_field)?;
+    // file comment
+    // <none>
+
+    Ok(())
+}
+
+#[cfg(feature = "async")]
+async fn write_central_directory_header_async<T: AsyncWrite + Unpin>(
+    writer: &mut T,
+    file: &ZipFileData,
+) -> ZipResult<()> {
+    let mut writer = Compat(writer);
+    // central file header signature
+    writer
+        .write_u32_le(spec::CENTRAL_DIRECTORY_HEADER_SIGNATURE)
+        .await?;
+    // version made by
+    let version_made_by = (file.system as u16) << 8 | (file.version_made_by as u16);
+    writer.write_u16_le(version_made_by).await?;
+    // version needed to extract
+    writer.write_u16_le(file.version_needed()).await?;
+    // general puprose bit flag
+    let flag = if !file.file_name.is_ascii() {
+        1u16 << 11
+    } else {
+        0
+    };
+    writer.write_u16_le(flag).await?;
+    // compression method
+    #[allow(deprecated)]
+    writer
+        .write_u16_le(file.compression_method.to_u16())
+        .await?;
+    // last mod file time + date
+    writer
+        .write_u16_le(file.last_modified_time.timepart())
+        .await?;
+    writer
+        .write_u16_le(file.last_modified_time.datepart())
+        .await?;
+    // crc-32
+    writer.write_u32_le(file.crc32).await?;
+    // compressed size
+    writer.write_u32_le(file.compressed_size as u32).await?;
+    // uncompressed size
+    writer.write_u32_le(file.uncompressed_size as u32).await?;
+    // file name length
+    writer
+        .write_u16_le(file.file_name.as_bytes().len() as u16)
+        .await?;
+    // extra field length
+    let extra_field = build_extra_field(file)?;
+    writer.write_u16_le(extra_field.len() as u16).await?;
+    // file comment length
+    writer.write_u16_le(0).await?;
+    // disk number start
+    writer.write_u16_le(0).await?;
+    // internal file attribytes
+    writer.write_u16_le(0).await?;
+    // external file attributes
+    writer.write_u32_le(file.external_attributes).await?;
+    // relative offset of local header
+    writer.write_u32_le(file.header_start as u32).await?;
+    // file name
+    writer.write_all(file.file_name.as_bytes()).await?;
+    // extra field
+    writer.write_all(&extra_field).await?;
     // file comment
     // <none>
 
