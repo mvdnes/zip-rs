@@ -293,15 +293,12 @@ impl<W: Write + io::Seek> ZipWriter<W> {
     }
 
     /// Start a new file for with the requested options.
-    fn start_entry<S>(
+    fn start_entry(
         &mut self,
-        name: S,
+        name_raw: &[u8],
         options: FileOptions,
         raw_values: Option<ZipRawValues>,
-    ) -> ZipResult<()>
-    where
-        S: Into<String>,
-    {
+    ) -> ZipResult<()> {
         self.finish_file()?;
 
         let raw_values = raw_values.unwrap_or_else(|| ZipRawValues {
@@ -325,8 +322,8 @@ impl<W: Write + io::Seek> ZipWriter<W> {
                 crc32: raw_values.crc32,
                 compressed_size: raw_values.compressed_size,
                 uncompressed_size: raw_values.uncompressed_size,
-                file_name: name.into(),
-                file_name_raw: Vec::new(), // Never used for saving
+                file_name: String::from_utf8_lossy(name_raw).to_string(),
+                file_name_raw: name_raw.into(),
                 extra_field: Vec::new(),
                 file_comment: String::new(),
                 header_start,
@@ -378,13 +375,27 @@ impl<W: Write + io::Seek> ZipWriter<W> {
         Ok(())
     }
 
-    /// Create a file in the archive and start writing its' contents.
+    /// Create a file in the archive and start writing its contents.
     ///
     /// The data should be written using the [`io::Write`] implementation on this [`ZipWriter`]
     pub fn start_file<S>(&mut self, name: S, mut options: FileOptions) -> ZipResult<()>
     where
         S: Into<String>,
     {
+        if options.permissions.is_none() {
+            options.permissions = Some(0o644);
+        }
+        *options.permissions.as_mut().unwrap() |= 0o100000;
+        self.start_entry(name.into().as_bytes(), options, None)?;
+        self.inner.switch_to(options.compression_method)?;
+        self.writing_to_file = true;
+        Ok(())
+    }
+
+    /// Create a file in the archive with a raw-bytes-name and start writing its contents.
+    ///
+    /// The data should be written using the [`io::Write`] implementation on this [`ZipWriter`]
+    pub fn start_file_raw_name(&mut self, name: &[u8], mut options: FileOptions) -> ZipResult<()> {
         if options.permissions.is_none() {
             options.permissions = Some(0o644);
         }
@@ -515,7 +526,7 @@ impl<W: Write + io::Seek> ZipWriter<W> {
             options.permissions = Some(0o644);
         }
         *options.permissions.as_mut().unwrap() |= 0o100000;
-        self.start_entry(name, options, None)?;
+        self.start_entry(name.into().as_bytes(), options, None)?;
         self.writing_to_file = true;
         self.writing_to_extra_field = true;
         Ok(self.files.last().unwrap().data_start)
@@ -616,7 +627,7 @@ impl<W: Write + io::Seek> ZipWriter<W> {
             uncompressed_size: file.size(),
         };
 
-        self.start_entry(name, options, Some(raw_values))?;
+        self.start_entry(name.into().as_bytes(), options, Some(raw_values))?;
         self.writing_to_file = true;
         self.writing_raw = true;
 
@@ -673,7 +684,7 @@ impl<W: Write + io::Seek> ZipWriter<W> {
             _ => name_as_string + "/",
         };
 
-        self.start_entry(name_with_slash, options, None)?;
+        self.start_entry(name_with_slash.as_bytes(), options, None)?;
         self.writing_to_file = false;
         Ok(())
     }
@@ -897,7 +908,10 @@ fn write_local_file_header<T: Write>(writer: &mut T, file: &ZipFileData) -> ZipR
     // version needed to extract
     writer.write_u16::<LittleEndian>(file.version_needed())?;
     // general purpose bit flag
-    let flag = if !file.file_name.is_ascii() {
+    let flag = if !std::str::from_utf8(&file.file_name_raw)
+        .unwrap_or("あ")
+        .is_ascii()
+    {
         1u16 << 11
     } else {
         0
@@ -924,12 +938,12 @@ fn write_local_file_header<T: Write>(writer: &mut T, file: &ZipFileData) -> ZipR
         file.uncompressed_size as u32
     })?;
     // file name length
-    writer.write_u16::<LittleEndian>(file.file_name.as_bytes().len() as u16)?;
+    writer.write_u16::<LittleEndian>(file.file_name_raw.len() as u16)?;
     // extra field length
     let extra_field_length = if file.large_file { 20 } else { 0 } + file.extra_field.len() as u16;
     writer.write_u16::<LittleEndian>(extra_field_length)?;
     // file name
-    writer.write_all(file.file_name.as_bytes())?;
+    writer.write_all(&file.file_name_raw)?;
     // zip64 extra field
     if file.large_file {
         write_local_zip64_extra_field(writer, &file)?;
@@ -984,7 +998,10 @@ fn write_central_directory_header<T: Write>(writer: &mut T, file: &ZipFileData) 
     // version needed to extract
     writer.write_u16::<LittleEndian>(file.version_needed())?;
     // general puprose bit flag
-    let flag = if !file.file_name.is_ascii() {
+    let flag = if !std::str::from_utf8(&file.file_name_raw)
+        .unwrap_or("あ")
+        .is_ascii()
+    {
         1u16 << 11
     } else {
         0
@@ -1011,7 +1028,7 @@ fn write_central_directory_header<T: Write>(writer: &mut T, file: &ZipFileData) 
         file.uncompressed_size as u32
     })?;
     // file name length
-    writer.write_u16::<LittleEndian>(file.file_name.as_bytes().len() as u16)?;
+    writer.write_u16::<LittleEndian>(file.file_name_raw.len() as u16)?;
     // extra field length
     writer.write_u16::<LittleEndian>(zip64_extra_field_length + file.extra_field.len() as u16)?;
     // file comment length
@@ -1029,7 +1046,7 @@ fn write_central_directory_header<T: Write>(writer: &mut T, file: &ZipFileData) 
         file.header_start as u32
     })?;
     // file name
-    writer.write_all(file.file_name.as_bytes())?;
+    writer.write_all(&file.file_name_raw)?;
     // zip64 extra field
     writer.write_all(&zip64_extra_field[..zip64_extra_field_length as usize])?;
     // extra field
@@ -1111,7 +1128,7 @@ fn update_local_zip64_extra_field<T: Write + io::Seek>(
     writer: &mut T,
     file: &ZipFileData,
 ) -> ZipResult<()> {
-    let zip64_extra_field = file.header_start + 30 + file.file_name.as_bytes().len() as u64;
+    let zip64_extra_field = file.header_start + 30 + file.file_name_raw.len() as u64;
     writer.seek(io::SeekFrom::Start(zip64_extra_field + 4))?;
     writer.write_u64::<LittleEndian>(file.uncompressed_size)?;
     writer.write_u64::<LittleEndian>(file.compressed_size)?;
