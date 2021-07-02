@@ -22,6 +22,9 @@ use flate2::write::DeflateEncoder;
 #[cfg(feature = "bzip2")]
 use bzip2::write::BzEncoder;
 
+#[cfg(feature = "zstd")]
+use zstd::stream::write::Encoder as ZstdEncoder;
+
 enum GenericZipWriter<W: Write + io::Seek> {
     Closed,
     Storer(W),
@@ -33,6 +36,8 @@ enum GenericZipWriter<W: Write + io::Seek> {
     Deflater(DeflateEncoder<W>),
     #[cfg(feature = "bzip2")]
     Bzip2(BzEncoder<W>),
+    #[cfg(feature = "zstd")]
+    Zstd(ZstdEncoder<'static, W>),
 }
 
 /// ZIP archive generator
@@ -804,6 +809,8 @@ impl<W: Write + io::Seek> GenericZipWriter<W> {
             GenericZipWriter::Deflater(w) => w.finish()?,
             #[cfg(feature = "bzip2")]
             GenericZipWriter::Bzip2(w) => w.finish()?,
+            #[cfg(feature = "zstd")]
+            GenericZipWriter::Zstd(w) => w.finish()?,
             GenericZipWriter::Closed => {
                 return Err(io::Error::new(
                     io::ErrorKind::BrokenPipe,
@@ -830,6 +837,10 @@ impl<W: Write + io::Seek> GenericZipWriter<W> {
                 CompressionMethod::Bzip2 => {
                     GenericZipWriter::Bzip2(BzEncoder::new(bare, bzip2::Compression::default()))
                 }
+                #[cfg(feature = "zstd")]
+                CompressionMethod::Zstd => {
+                    GenericZipWriter::Zstd(ZstdEncoder::new(bare, 0).unwrap())
+                }
                 CompressionMethod::Unsupported(..) => {
                     return Err(ZipError::UnsupportedArchive("Unsupported compression"))
                 }
@@ -850,6 +861,8 @@ impl<W: Write + io::Seek> GenericZipWriter<W> {
             GenericZipWriter::Deflater(ref mut w) => Some(w as &mut dyn Write),
             #[cfg(feature = "bzip2")]
             GenericZipWriter::Bzip2(ref mut w) => Some(w as &mut dyn Write),
+            #[cfg(feature = "zstd")]
+            GenericZipWriter::Zstd(ref mut w) => Some(w as &mut dyn Write),
             GenericZipWriter::Closed => None,
         }
     }
@@ -879,6 +892,8 @@ impl<W: Write + io::Seek> GenericZipWriter<W> {
             GenericZipWriter::Deflater(..) => Some(CompressionMethod::Deflated),
             #[cfg(feature = "bzip2")]
             GenericZipWriter::Bzip2(..) => Some(CompressionMethod::Bzip2),
+            #[cfg(feature = "zstd")]
+            GenericZipWriter::Zstd(..) => Some(CompressionMethod::Zstd),
             GenericZipWriter::Closed => None,
         }
     }

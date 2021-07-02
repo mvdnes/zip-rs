@@ -17,6 +17,7 @@ byteorder = "1.3"
 bzip2 = { version = "0.4", optional = true }
 crc32fast = "1.0"
 thiserror = "1.0"
+zstd = { version = "0.8", optional = true }
 
 [dev-dependencies]
 bencher = "0.1"
@@ -28,7 +29,7 @@ deflate = ["flate2/rust_backend"]
 deflate-miniz = ["flate2/default"]
 deflate-zlib = ["flate2/zlib"]
 unreserved = []
-default = ["bzip2", "deflate", "time"]
+default = ["bzip2", "deflate", "time", "zstd"]
 
 [[bench]]
 name = "read_entry"

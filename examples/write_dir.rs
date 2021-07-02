@@ -32,6 +32,11 @@ const METHOD_BZIP2: Option<zip::CompressionMethod> = Some(zip::CompressionMethod
 #[cfg(not(feature = "bzip2"))]
 const METHOD_BZIP2: Option<zip::CompressionMethod> = None;
 
+#[cfg(feature = "zstd")]
+const METHOD_ZSTD: Option<zip::CompressionMethod> = Some(zip::CompressionMethod::Zstd);
+#[cfg(not(feature = "zstd"))]
+const METHOD_ZSTD: Option<zip::CompressionMethod> = None;
+
 fn real_main() -> i32 {
     let args: Vec<_> = std::env::args().collect();
     if args.len() < 3 {
@@ -44,7 +49,7 @@ fn real_main() -> i32 {
 
     let src_dir = &*args[1];
     let dst_file = &*args[2];
-    for &method in [METHOD_STORED, METHOD_DEFLATED, METHOD_BZIP2].iter() {
+    for &method in [METHOD_STORED, METHOD_DEFLATED, METHOD_BZIP2, METHOD_ZSTD].iter() {
         if method.is_none() {
             continue;
         }

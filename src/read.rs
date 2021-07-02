@@ -24,6 +24,9 @@ use flate2::read::DeflateDecoder;
 #[cfg(feature = "bzip2")]
 use bzip2::read::BzDecoder;
 
+#[cfg(feature = "zstd")]
+use zstd::stream::read::Decoder as ZstdDecoder;
+
 mod ffi {
     pub const S_IFDIR: u32 = 0o0040000;
     pub const S_IFREG: u32 = 0o0100000;
@@ -90,6 +93,8 @@ enum ZipFileReader<'a> {
     Deflated(Crc32Reader<flate2::read::DeflateDecoder<CryptoReader<'a>>>),
     #[cfg(feature = "bzip2")]
     Bzip2(Crc32Reader<BzDecoder<CryptoReader<'a>>>),
+    #[cfg(feature = "zstd")]
+    Zstd(Crc32Reader<ZstdDecoder<'a, io::BufReader<CryptoReader<'a>>>>),
 }
 
 impl<'a> Read for ZipFileReader<'a> {
@@ -106,6 +111,8 @@ impl<'a> Read for ZipFileReader<'a> {
             ZipFileReader::Deflated(r) => r.read(buf),
             #[cfg(feature = "bzip2")]
             ZipFileReader::Bzip2(r) => r.read(buf),
+            #[cfg(feature = "zstd")]
+            ZipFileReader::Zstd(r) => r.read(buf),
         }
     }
 }
@@ -125,6 +132,8 @@ impl<'a> ZipFileReader<'a> {
             ZipFileReader::Deflated(r) => r.into_inner().into_inner().into_inner(),
             #[cfg(feature = "bzip2")]
             ZipFileReader::Bzip2(r) => r.into_inner().into_inner().into_inner(),
+            #[cfg(feature = "zstd")]
+            ZipFileReader::Zstd(r) => r.into_inner().finish().into_inner().into_inner(),
         }
     }
 }
@@ -209,6 +218,11 @@ fn make_reader<'a>(
         CompressionMethod::Bzip2 => {
             let bzip2_reader = BzDecoder::new(reader);
             ZipFileReader::Bzip2(Crc32Reader::new(bzip2_reader, crc32))
+        }
+        #[cfg(feature = "zstd")]
+        CompressionMethod::Zstd => {
+            let zstd_reader = ZstdDecoder::new(reader).unwrap();
+            ZipFileReader::Zstd(Crc32Reader::new(zstd_reader, crc32))
         }
         _ => panic!("Compression method not supported"),
     }

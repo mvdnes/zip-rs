@@ -17,6 +17,7 @@ Supported compression formats:
 * stored (i.e. none)
 * deflate
 * bzip2
+* zstd (in progress...)
 
 Currently unsupported zip extensions:
 
@@ -42,9 +43,10 @@ zip = { version = "0.5", default-features = false }
 
 The features available are:
 
-* `deflate`: Enables the deflate compression algorithm, which is the default for zipfiles
+* `deflate`: Enables the deflate compression algorithm, which is the default for zipfiles.
 * `bzip2`: Enables the BZip2 compression algorithm.
 * `time`: Enables features using the [time](https://github.com/rust-lang-deprecated/time) crate.
+* `zstd`: Enables the Zstandard compression algorithm.
 
 All of these are enabled by default.
 

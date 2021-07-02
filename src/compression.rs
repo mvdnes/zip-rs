@@ -24,6 +24,9 @@ pub enum CompressionMethod {
     /// Compress the file using BZIP2
     #[cfg(feature = "bzip2")]
     Bzip2,
+    /// Compress the file using ZStandard
+    #[cfg(feature = "zstd")]
+    Zstd,
     /// Unsupported compression method
     #[deprecated(since = "0.5.7", note = "use the constants instead")]
     Unsupported(u16),
@@ -60,6 +63,9 @@ impl CompressionMethod {
     pub const IBM_ZOS_CMPSC: Self = CompressionMethod::Unsupported(16);
     pub const IBM_TERSE: Self = CompressionMethod::Unsupported(18);
     pub const ZSTD_DEPRECATED: Self = CompressionMethod::Unsupported(20);
+    #[cfg(feature = "zstd")]
+    pub const ZSTD: Self = CompressionMethod::Zstd;
+    #[cfg(not(feature = "zstd"))]
     pub const ZSTD: Self = CompressionMethod::Unsupported(93);
     pub const MP3: Self = CompressionMethod::Unsupported(94);
     pub const XZ: Self = CompressionMethod::Unsupported(95);
@@ -85,6 +91,8 @@ impl CompressionMethod {
             8 => CompressionMethod::Deflated,
             #[cfg(feature = "bzip2")]
             12 => CompressionMethod::Bzip2,
+            #[cfg(feature = "zstd")]
+            93 => CompressionMethod::Zstd,
 
             v => CompressionMethod::Unsupported(v),
         }
@@ -107,6 +115,9 @@ impl CompressionMethod {
             CompressionMethod::Deflated => 8,
             #[cfg(feature = "bzip2")]
             CompressionMethod::Bzip2 => 12,
+            #[cfg(feature = "zstd")]
+            CompressionMethod::Zstd => 93,
+
             CompressionMethod::Unsupported(v) => v,
         }
     }
@@ -145,6 +156,9 @@ mod test {
         methods.push(CompressionMethod::Deflated);
         #[cfg(feature = "bzip2")]
         methods.push(CompressionMethod::Bzip2);
+        #[cfg(feature = "zstd")]
+        methods.push(CompressionMethod::Zstd);
+
         methods
     }
 
